@@ -1,0 +1,22 @@
+runnerToken: ""
+gitlabUrl: "https://gitlab.com"
+rbac:
+  create: true
+serviceAccount:
+  create: true
+  name: gitlabrunner-service-account
+
+runners:
+  config: |
+    [[runners]]
+      [runners.kubernetes]
+        namespace = "{{ default .Release.Namespace .Values.runners.jobNamespace }}"
+        image = "alpine"
+        privileged = true
+        poll_timeout = 600
+        [[runners.kubernetes.volumes.host_path]]
+          name = "docker"
+          mount_path = "/var/run/docker.sock"
+          read_only = true
+          host_path = "/var/run/docker.sock"
+
