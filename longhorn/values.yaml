@@ -1,0 +1,6 @@
+longhornManager:
+  nodeSelector: 
+    role: worker
+persistence:
+  defaultClassReplicaCount: 2
+  defaultDataLocality: "best-effort"
