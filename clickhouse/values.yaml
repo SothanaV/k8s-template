@@ -1,0 +1,56 @@
+image:
+  registry: docker.io
+  repository: bitnami/clickhouse
+  tag: 25.7.5
+shards: 1
+replicaCount: 2
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - clickhouse-01
+                - clickhouse-02
+
+
+keeper:
+  replicaCount: 3
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                  - clickhouse-keeper-01
+                  - clickhouse-keeper-02
+                  - clickhouse-keeper-03
+
+
+persistence:
+  storageClass: "longhorn"
+  size: "500Gi"
+
+auth:
+  username: admin
+  password: WbMXcEQDW24ZRzXaqJK2HlYDXk36N05Q
+
+resources:
+  limits:
+    memory: 28Gi
+  requests:
+    cpu: "4"
+    memory: 12Gi
+
+configdFiles:
+  logs.xml: |
+    <yandex>
+        <query_log>
+          <database>system</database>
+          <table>query_log</table>
+        </query_log>
+    </yandex>
