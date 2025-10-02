@@ -1,6 +1,6 @@
 image:
   registry: docker.io
-  repository: bitnami/clickhouse
+  repository: bitnamilegacy/clickhouse
   tag: 25.7.5
 shards: 1
 replicaCount: 2
