@@ -20,18 +20,14 @@ longhorn/longhorn       1.9.1           v1.9.1          Longhorn is a distribute
 longhorn/longhorn       1.9.0           v1.9.0          Longhorn is a distributed block storage system ...
 ```
 
-- (optional) tag node
-```bash
-# label
-kubectl label nodes <NODE_NAME> role=worker
-
-# verify
-kubectl get nodes --show-labels
-```
-
 - edit `values.yaml`
 
 - install
 ```
-helm install clickhouse longhorn/longhorn --create-namespace --version 1.10.0 -f values.yaml
+helm install longhorn longhorn/longhorn --namespace longhorn-system --create-namespace --version 1.10.0 -f values.yaml
+```
+
+- uninstall
+```
+helm uninstall longhorn -n longhorn-system 
 ```

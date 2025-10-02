@@ -1,6 +1,7 @@
-longhornManager:
-  nodeSelector: 
-    role: worker
 persistence:
   defaultClassReplicaCount: 2
   defaultDataLocality: "best-effort"
+
+ingress:
+  enabled: true
+  host: longhorn.xxx.com
