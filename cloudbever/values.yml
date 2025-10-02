@@ -1,0 +1,7 @@
+image:
+  registry: docker.io
+  repository: dbeaver/cloudbeaver
+  tag: 25.2.1
+ingress:
+  enabled: true
+  hostname: cloudbeaver.xxx.com
