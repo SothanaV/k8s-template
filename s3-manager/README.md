@@ -1,5 +1,5 @@
 # S3 Manager
-
+src : https://github.com/cloudlena/s3manager
 - add helm repo
 ```
 helm repo add sergeyshevch https://sergeyshevch.github.io/charts
