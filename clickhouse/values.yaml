@@ -17,6 +17,10 @@ affinity:
 
 
 keeper:
+  image:
+      registry: docker.io
+      repository: bitnamilegacy/clickhouse-keeper
+      tag: 25.7.5-debian-12-r0
   replicaCount: 3
   affinity:
     nodeAffinity:
