@@ -5,3 +5,6 @@ image:
 ingress:
   enabled: true
   hostname: cloudbeaver.xxx.com
+  ingressClassName: "nginx"
+persistence:
+  storageClass: ""
