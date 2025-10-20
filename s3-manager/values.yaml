@@ -1,3 +1,4 @@
+nameOverride: "" # use when install in same namespace
 replicaCount: 1
 
 image:
