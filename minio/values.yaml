@@ -1,0 +1,47 @@
+nameOverride: ""
+image:
+  registry: docker.io
+  repository: bitnamilegacy/minio
+  tag: 2025.3.12-debian-12-r2
+clientImage:
+  registry: docker.io
+  repository: bitnamilegacy/minio-client
+  tag: 2025.3.12-debian-12-r2
+
+defaultInitContainers:
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/os-shell
+    tag: 12-debian-12-r50
+console:
+  image:
+    registry: docker.io
+    repository: bitnamilegacy/minio-object-browser
+    tag: 2.0.2-debian-12-r3
+  ingress:
+    enable: true
+    ingressClassName: ""
+    hostname: minio.local
+
+auth:
+  rootUser: admin
+  rootPassword: "qwer1234!@#$"
+
+mode: "distributed"
+
+statefulset:
+  replicaCount: 4
+
+resources:
+  requests:
+    cpu: 2
+    memory: 1024Mi
+  limits:
+    cpu: 8
+    memory: 4096Mi
+
+persistence:
+  storageClass: "longhorn"
+  accessModes:
+    - ReadWriteMany
+  size: 50Gi
