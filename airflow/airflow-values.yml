@@ -1,0 +1,105 @@
+airflowVersion: "3.0.6"
+defaultAirflowTag: "3.0.6"
+executor: KubernetesExecutor
+registry:
+  secretName: gitlab
+logs:
+  persistence:
+    enabled: true
+    size: 10Gi  # Adjust based on your needs
+securityContext:
+  runAsUser: 50000
+  fsGroup: 1001
+postgresql:
+  image:
+    repository: bitnamilegacy/postgresql
+images:
+  airflow:
+    repository: registry.gitlab.com/...
+    tag: latest
+    pullPolicy: Always
+  useDefaultImageForMigration: true
+  pod_template:
+    repository: registry.gitlab.com/...
+    tag: latest
+    pullPolicy: Always
+
+dagProcessor:
+  extraInitContainers:
+    - name: fix-log-permissions
+      image: busybox
+      command:
+        - sh
+        - -c
+        - chown -R 50000:1001 /opt/airflow/logs
+      volumeMounts:
+        - name: logs
+          mountPath: /opt/airflow/logs
+      securityContext:
+        runAsUser: 0 
+
+apiServer:
+  apiServerConfig: |
+    from __future__ import annotations
+
+    import os
+    import requests
+    from flask_appbuilder.security.manager import AUTH_OAUTH, AUTH_DB
+    from airflow.providers.fab.auth_manager.security_manager.override import FabAirflowSecurityManagerOverride
+
+    basedir = os.path.abspath(os.path.dirname(__file__))
+
+    # Flask-WTF flag for CSRF
+    WTF_CSRF_ENABLED = True
+
+    # AUTH_TYPE = AUTH_OAUTH
+    AUTH_TYPE = AUTH_DB
+    OAUTH_PROVIDERS = [{
+        'name':'dsm',
+        'token_key':'access_token',
+        'icon':'fa-lock',
+            'remote_app': {
+                'api_base_url':'http://oauth.dataplatform:18000/api/v1/account/me/',
+                'access_token_url':'http://oauth.dataplatform:18000/o/token/',
+                'authorize_url':'https://oauth-dev-ins.tlnw.magnecomp.com/o/authorize',
+                'request_token_url': None,
+                'client_id': "",
+                'client_secret': "",
+            }
+    }]
+
+
+    class CustomSecurity(FabAirflowSecurityManagerOverride):
+        
+        def sync_roles(self):
+            # Custom logic or possibly skipping the sync altogether
+            pass
+
+        def get_oauth_user_info(self, provider, response=None):
+            if provider == "dsm":
+                config = {}
+                for elm in OAUTH_PROVIDERS:
+                    if elm.get('name') == 'dsm':
+                        config = elm.get('remote_app')
+                res = requests.get(config.get('api_base_url'), headers={
+                    'Authorization': f"{response.get('token_type')} {response.get('access_token')}"
+                })
+                if res.status_code!=200:
+                    print(res.text)
+                    return {}
+                me = res.json()
+                print(me)
+                parsed_token = {
+                    "email": me["email"],
+                    "first_name": me["first_name"],
+                    "last_name": me["last_name"],
+                    "username": me["username"],
+                    "role_keys": ["Admin", "Viewer"],
+                }
+                return parsed_token
+            return {}
+
+    # SECURITY_MANAGER_CLASS = CustomSecurity
+    AUTH_USER_REGISTRATION = True
+    AUTH_ROLES_SYNC_AT_LOGIN = True
+    AUTH_USER_REGISTRATION_ROLE = "Admin"
