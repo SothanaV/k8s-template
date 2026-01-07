@@ -1,0 +1,89 @@
+# Default values for databasus
+
+# Image configuration
+image:
+  repository: databasus/databasus
+  tag: v2.21.0
+  pullPolicy: IfNotPresent
+
+# StatefulSet configuration
+replicaCount: 1
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 4005          # Service port
+  targetPort: 4005    # Internal container port
+  # Headless service for StatefulSet
+  headless:
+    enabled: true
+
+# Resource limits and requests
+resources:
+  requests:
+    memory: "1Gi"
+    cpu: "500m"
+  limits:
+    memory: "1Gi"
+    cpu: "500m"
+
+# Persistent storage configuration
+persistence:
+  enabled: true
+  storageClassName: "hpe-standard"
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  # Mount path in container
+  mountPath: /databasus-data
+
+# Ingress configuration (disabled by default - using LoadBalancer instead)
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: databasus-xxx.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: star-xxx-cert
+      hosts:
+        - databasus-xxx.com
+
+# Health checks configuration
+# Note: The application only has /api/v1/system/health endpoint
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /api/v1/system/health
+    port: 4005
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /api/v1/system/health
+    port: 4005
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# StatefulSet update strategy
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    partition: 0
+
+# Pod labels and annotations
+podLabels: {}
+podAnnotations: {}
+
+# Node selector, tolerations and affinity
+nodeSelector: {}
+tolerations: []
+affinity: {}
