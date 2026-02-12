@@ -1,0 +1,223 @@
+image:
+  repository: n8nio/n8n
+  pullPolicy: IfNotPresent
+  tag: "1.76.1"
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+hostAliases: []
+
+ingress:
+  enabled: true
+  annotations: {}
+  # define a custom ingress class Name, like "traefik" or "nginx"
+  className: "nginx"
+  hosts:
+    - host: n8n-dev-ins.xyz.com
+      paths:
+        - /
+  tls:
+    - secretName: star-xyz-cert
+      hosts:
+        - n8n-dev-ins.xyz.com
+
+main:
+  config: {}
+  secret: {}
+  extraEnv: {}
+
+  persistence:
+    enabled: true
+    storageClass: "longhorn" # or use "" for default storage class
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+
+  extraVolumes: []
+  extraVolumeMounts: []
+
+  replicaCount: 1
+
+  deploymentStrategy:
+    type: "Recreate"
+
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+
+  deploymentAnnotations: {}
+  deploymentLabels: {}
+  podAnnotations: {}
+  podLabels: {}
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+
+  securityContext: {}
+  lifecycle: {}
+  command: []
+
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+  initContainers: []
+
+  service:
+    enabled: true
+    annotations: {}
+    type: ClusterIP
+    port: 80
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1024Mi
+
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 100
+    targetCPUUtilizationPercentage: 80
+    # targetMemoryUtilizationPercentage: 80
+
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Pod termination grace period in seconds
+  terminationGracePeriodSeconds: 30
+
+worker:
+  enabled: false
+  config: {}
+  secret: {}
+  extraEnv: {}
+  concurrency: 10
+  persistence:
+    enabled: false
+    type: emptyDir
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+  replicaCount: 1
+  deploymentStrategy:
+    type: "Recreate"
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+  deploymentAnnotations: {}
+  deploymentLabels: {}
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext: {}
+  lifecycle: {}
+  command: []
+  commandArgs: []
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+  initContainers: []
+  service:
+    annotations: {}
+    type: ClusterIP
+    port: 80
+  resources: {}
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 100
+    targetCPUUtilizationPercentage: 80
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  terminationGracePeriodSeconds: 30
+
+webhook:
+  enabled: false
+  config: {}
+  secret: {}
+  extraEnv: {}
+  persistence:
+    enabled: false
+    type: emptyDir
+    accessModes:
+      - ReadWriteOnce
+    size: 1Gi
+  replicaCount: 1
+  deploymentStrategy:
+    type: "Recreate"
+  nameOverride: ""
+  fullnameOverride: ""
+  serviceAccount:
+    create: true
+    annotations: {}
+    name: ""
+  deploymentAnnotations: {}
+  deploymentLabels: {}
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext: {}
+  lifecycle: {}
+  command: []
+  commandArgs: []
+  livenessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+  readinessProbe:
+    httpGet:
+      path: /healthz
+      port: http
+  initContainers: []
+  service:
+    annotations: {}
+    type: ClusterIP
+    port: 80
+  resources: {}
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 100
+    targetCPUUtilizationPercentage: 80
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  terminationGracePeriodSeconds: 30
+
+extraManifests: []
+extraTemplateManifests: []
+
+valkey:
+  enabled: false
