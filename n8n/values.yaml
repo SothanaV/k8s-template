@@ -1,223 +1,54 @@
+# n8n-custom.yaml
+
+# 1. Image Pinning (Recommended for stability)
 image:
-  repository: n8nio/n8n
-  pullPolicy: IfNotPresent
-  tag: "1.76.1"
+  tag: "2.8.1" # Replace with the latest version you want
 
-imagePullSecrets: []
+# 2. Security (PASTE YOUR GENERATED KEY BELOW)
+encryptionKey: "PASTE_YOUR_GENERATED_KEY_HERE"
 
-nameOverride: ""
-fullnameOverride: ""
+# 3. Database Configuration (Use Postgres instead of SQLite)
+db:
+  type: postgresdb
 
-hostAliases: []
+# 4. Enable the internal Postgres database
+postgresql:
+  enabled: true
+  auth:
+    username: n8n
+    password: "secure_db_password" # Must match the password above
+    database: n8n
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
 
+# 5. Persistence (Save your workflows and files)
+main:
+  persistence:
+    enabled: true
+    size: 5Gi
+    accessMode: ReadWriteOnce
+
+# 6. Ingress (Expose to the internet)
 ingress:
   enabled: true
-  annotations: {}
-  # define a custom ingress class Name, like "traefik" or "nginx"
-  className: "nginx"
+  className: nginx # Change if using Traefik or ALB
   hosts:
     - host: n8n-dev-ins.xyz.com
       paths:
-        - /
+        - path: /
+          pathType: ImplementationSpecific
   tls:
     - secretName: star-xyz-cert
       hosts:
         - n8n-dev-ins.xyz.com
 
-main:
-  config: {}
-  secret: {}
-  extraEnv: {}
-
-  persistence:
-    enabled: true
-    storageClass: "longhorn" # or use "" for default storage class
-    accessModes:
-      - ReadWriteOnce
-    size: 1Gi
-
-  extraVolumes: []
-  extraVolumeMounts: []
-
-  replicaCount: 1
-
-  deploymentStrategy:
-    type: "Recreate"
-
-  serviceAccount:
-    create: true
-    annotations: {}
-    name: ""
-
-  deploymentAnnotations: {}
-  deploymentLabels: {}
-  podAnnotations: {}
-  podLabels: {}
-
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-
-  securityContext: {}
-  lifecycle: {}
-  command: []
-
-  livenessProbe:
-    httpGet:
-      path: /healthz
-      port: http
-
-  readinessProbe:
-    httpGet:
-      path: /healthz
-      port: http
-  initContainers: []
-
-  service:
-    enabled: true
-    annotations: {}
-    type: ClusterIP
-    port: 80
-
-  resources:
-    requests:
-      cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 1000m
-      memory: 1024Mi
-
-  autoscaling:
-    enabled: false
-    minReplicas: 1
-    maxReplicas: 100
-    targetCPUUtilizationPercentage: 80
-    # targetMemoryUtilizationPercentage: 80
-
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
-
-  # Pod termination grace period in seconds
-  terminationGracePeriodSeconds: 30
-
-worker:
-  enabled: false
-  config: {}
-  secret: {}
-  extraEnv: {}
-  concurrency: 10
-  persistence:
-    enabled: false
-    type: emptyDir
-    accessModes:
-      - ReadWriteOnce
-    size: 1Gi
-  replicaCount: 1
-  deploymentStrategy:
-    type: "Recreate"
-  serviceAccount:
-    create: true
-    annotations: {}
-    name: ""
-  deploymentAnnotations: {}
-  deploymentLabels: {}
-  podAnnotations: {}
-  podLabels: {}
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-  securityContext: {}
-  lifecycle: {}
-  command: []
-  commandArgs: []
-  livenessProbe:
-    httpGet:
-      path: /healthz
-      port: http
-  readinessProbe:
-    httpGet:
-      path: /healthz
-      port: http
-  initContainers: []
-  service:
-    annotations: {}
-    type: ClusterIP
-    port: 80
-  resources: {}
-  autoscaling:
-    enabled: false
-    minReplicas: 1
-    maxReplicas: 100
-    targetCPUUtilizationPercentage: 80
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
-  terminationGracePeriodSeconds: 30
-
-webhook:
-  enabled: false
-  config: {}
-  secret: {}
-  extraEnv: {}
-  persistence:
-    enabled: false
-    type: emptyDir
-    accessModes:
-      - ReadWriteOnce
-    size: 1Gi
-  replicaCount: 1
-  deploymentStrategy:
-    type: "Recreate"
-  nameOverride: ""
-  fullnameOverride: ""
-  serviceAccount:
-    create: true
-    annotations: {}
-    name: ""
-  deploymentAnnotations: {}
-  deploymentLabels: {}
-  podAnnotations: {}
-  podLabels: {}
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    runAsGroup: 1000
-    fsGroup: 1000
-  securityContext: {}
-  lifecycle: {}
-  command: []
-  commandArgs: []
-  livenessProbe:
-    httpGet:
-      path: /healthz
-      port: http
-  readinessProbe:
-    httpGet:
-      path: /healthz
-      port: http
-  initContainers: []
-  service:
-    annotations: {}
-    type: ClusterIP
-    port: 80
-  resources: {}
-  autoscaling:
-    enabled: false
-    minReplicas: 1
-    maxReplicas: 100
-    targetCPUUtilizationPercentage: 80
-  nodeSelector: {}
-  tolerations: []
-  affinity: {}
-  terminationGracePeriodSeconds: 30
-
-extraManifests: []
-extraTemplateManifests: []
-
-valkey:
-  enabled: false
+# 7. Resources (Prevent crashes)
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 2Gi
