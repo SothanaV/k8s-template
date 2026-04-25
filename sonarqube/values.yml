@@ -1,0 +1,96 @@
+# Default values for SonarQube.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# (DEPRECATED) If the deployment Type is set to Deployment SonarQube is deployed as a replica set.
+# StatefulSet will be removed in a future release in favor of Deployment. Default to StatefulSet for backwards compatibility.
+deploymentType: "StatefulSet"
+
+# There should not be more than 1 SonarQube instance connected to the same database. Please set this value to 1 or 0 (in case you need to scale down programmatically).
+replicaCount: 1
+
+# How many revisions to retain (Deployment ReplicaSets or StatefulSets)
+revisionHistoryLimit: 10
+
+# (DEPRECATED) This will use the default deployment strategy unless it is overridden
+deploymentStrategy:
+  type: Recreate
+
+community:
+  enabled: true
+
+image:
+  repository: sonarqube
+  tag: "26.4.0.121862-community"
+  pullPolicy: IfNotPresent
+  # If using a private repository, the imagePullSecrets to use
+  # pullSecrets:
+  #   - name: my-repo-secret
+
+# Set security context for sonarqube pod.
+# The current section contains the default values set in a generic Kubernetes cluster. If you are using OpenShift, you should not set any specific fsGroup.
+securityContext:
+  fsGroup: 0
+
+service:
+  type: ClusterIP
+  externalPort: 9000
+  internalPort: 9000
+  labels:
+  annotations: {}
+
+ingress:
+  enabled: true
+  # Used to create an Ingress record.
+  hosts:
+    - name: sonarqube.local.dfellow.com
+      # Different clouds or configurations might need /* as the default path
+      # path: /
+      # For additional control over serviceName and servicePort
+      # serviceName: someService
+      # servicePort: somePort
+      # the pathType can be one of the following values: Exact|Prefix|ImplementationSpecific(default)
+      # pathType: ImplementationSpecific
+  annotations: {}
+  tls: []
+  # Secrets must be manually created in the namespace. To generate a self-signed certificate (and private key) and then create the secret in the cluster please refer to official documentation available at https://kubernetes.github.io/ingress-nginx/user-guide/tls/#tls-secrets
+  # - secretName: chart-example-tls
+  #   hosts:
+  #     - chart-example.local
+
+# Affinity for pod assignment
+# Ref: https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#affinity-and-anti-affinity
+affinity: {}
+# Node labels for pod assignment
+# Ref: https://kubernetes.io/docs/user-guide/node-selection/
+# add a label to a node with the following command
+# kubectl label node <node> sonarqube=true
+nodeSelector: {}
+#  sonarqube: "true"
+resources:
+  limits:
+    cpu: 800m
+    memory: 6144M
+    ephemeral-storage: 512000M
+  requests:
+    cpu: 400m
+    memory: 2048M
+    ephemeral-storage: 1536M
+
+persistence:
+  enabled: true
+  ## Set annotations on pvc
+  annotations: {}
+  storageClass: longhorn
+  accessMode: ReadWriteOnce
+  size: 5Gi
+  uid: 1000
+  guid: 0
+
+  volumes: []
+  mounts: []
+
+# In case you want to specify different resources for emptyDir than {}
+emptyDir:
+  {}
+terminationGracePeriodSeconds: 10
