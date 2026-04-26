@@ -6,6 +6,7 @@ Helm chart templates and custom values for self-hosted Kubernetes services.
 
 | Service | Description | Namespace |
 |---------|-------------|-----------|
+| [Nginx Ingress](nginx-ingress/README.md) | Ingress controller for Kubernetes | `nginx-ingress` |
 | [Longhorn](longhorn/README.md) | Distributed block storage | `longhorn-system` |
 | [MinIO](minio/README.md) | S3-compatible object storage | `minio` |
 | [Airflow](airflow/README.md) | Workflow orchestration | `airflow` |
