@@ -13,6 +13,7 @@ Helm chart templates and custom values for self-hosted Kubernetes services.
 | [ClickHouse](clickhouse/README.md) | Column-oriented analytics database | `clickhouse` |
 | [CloudBeaver](cloudbever/README.md) | Web-based database manager | `cloudbever` |
 | [Databasus](databasus/README.md) | Database management UI | `databasus` |
+| [GitLab](gitlab/README.md) | Self-hosted DevOps platform | `gitlab` |
 | [GitLab Runner](gitlab-runner/README.md) | CI/CD runner for GitLab | `gitlab-runner` |
 | [n8n](n8n/README.md) | Workflow automation | `n8n` |
 | [S3 Manager](s3-manager/README.md) | Web UI for S3 buckets | `s3-manager` |
