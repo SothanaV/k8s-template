@@ -1,0 +1,57 @@
+# =========================================================
+# MINIMAL HA GITLAB CONFIGURATION
+# =========================================================
+
+global:
+  # 1. Ingress & Domain Configuration
+  edition: ce
+  gitlabVersion: "18.11.1"
+  hosts:
+    domain: gitlab.home.dfellow.com                # CHANGE THIS to your base domain
+  ingress:
+    configureCertmanager: false
+    provider: nginx
+    
+  # 2. External HA PostgreSQL Connection
+  # (Requires an external database like RDS, Cloud SQL, or Patroni)
+  psql:
+    password:
+      secret: gitlab-postgresql-password
+      key: postgresql-password  
+
+# 4. Disable Bundled Single-Node PostgreSQL
+postgresql:
+  install: true
+  # (Optional) Define storage size for the database PVC. Default is usually 8Gi.
+  primary:
+    persistence:
+      enabled: true
+      storageClass: "longhorn"
+      size: 10Gi
+
+# 5. Enable Bundled HA Redis (via Bitnami Redis Sentinel)
+# If using an external Redis (e.g., ElastiCache), set install: false here
+# and configure global.redis instead.
+redis:
+  install: true
+  architecture: standalone
+  auth:
+    existingSecret: gitlab-redis-secret # You must create this K8s secret manually
+    existingSecretPasswordKey: redis-password
+
+# 6. Scale GitLab App Components for HA
+gitlab:
+  webservice:
+    minReplicas: 2
+    maxReplicas: 10
+  sidekiq:
+    minReplicas: 2
+    maxReplicas: 4
+  gitaly:
+    persistence:
+      size: 5Gi  # Adjust based on expected repository sizes
+      storageClass: "longhorn"
+
+# 7. Scale NGINX Ingress Controller for HA
+nginx-ingress:
+  enabled: false
