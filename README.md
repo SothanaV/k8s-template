@@ -7,6 +7,7 @@ Helm chart templates and custom values for self-hosted Kubernetes services.
 | Service | Description | Namespace |
 |---------|-------------|-----------|
 | [Nginx Ingress](nginx-ingress/README.md) | Ingress controller for Kubernetes | `nginx-ingress` |
+| [MetalLB](metallb/MetalLB.md) | Bare-metal load balancer | `metallb-system` |
 | [Longhorn](longhorn/README.md) | Distributed block storage | `longhorn-system` |
 | [MinIO](minio/README.md) | S3-compatible object storage | `minio` |
 | [Airflow](airflow/README.md) | Workflow orchestration | `airflow` |
@@ -15,7 +16,7 @@ Helm chart templates and custom values for self-hosted Kubernetes services.
 | [Databasus](databasus/README.md) | Database management UI | `databasus` |
 | [GitLab](gitlab/README.md) | Self-hosted DevOps platform | `gitlab` |
 | [GitLab Runner](gitlab-runner/README.md) | CI/CD runner for GitLab | `gitlab-runner` |
-| [n8n](n8n/README.md) | Workflow automation | `n8n` |
+| [n8n](n8n/READEMD.md) | Workflow automation | `n8n` |
 | [S3 Manager](s3-manager/README.md) | Web UI for S3 buckets | `s3-manager` |
 | [SonarQube](sonarqube/README.md) | Code quality and security analysis | `sonarqube` |
 
