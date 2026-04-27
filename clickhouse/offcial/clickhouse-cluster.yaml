@@ -1,0 +1,73 @@
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: "tlnw-prd-cluster"
+spec:
+  defaults:
+    templates:
+      podTemplate: clickhouse-pod-template
+      dataVolumeClaimTemplate: clickhouse-storage-template
+      
+  configuration:
+    users:
+      # Note: For production, it's safer to use secrets, 
+      # but this matches your password request.
+      admin/password: "6ZHFKF9NhkC5qHSA9xLbj93fIYdQRSnMnebkU7LHeF1kfZ9iP9iPdK47D3j3FA4c"
+    
+    # Custom XML Configs
+    settings:
+      # Equivalent to your logs.xml config
+      query_log/database: "system"
+      query_log/table: "query_log"
+
+    clusters:
+      - name: "prd-cluster"
+        layout:
+          shardsCount: 1
+          replicasCount: 3
+    
+    # ClickHouse Keeper Configuration
+    zookeeper:
+      nodes:
+        - host: clickhouse-keeper-0.clickhouse-keeper-headless
+          port: 2181
+        - host: clickhouse-keeper-1.clickhouse-keeper-headless
+          port: 2181
+        - host: clickhouse-keeper-2.clickhouse-keeper-headless
+          port: 2181
+
+  templates:
+    podTemplates:
+      - name: clickhouse-pod-template
+        spec:
+          containers:
+            - name: clickhouse
+              image: docker.io/clickhouse/clickhouse-server:25.8-alpine
+              resources:
+                limits:
+                  memory: 64Gi
+                requests:
+                  cpu: "4"
+                  memory: 32Gi
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: kubernetes.io/hostname
+                        operator: In
+                        values:
+                          - tlnw-prd-insw04
+                          - tlnw-prd-insw05
+                          - tlnw-prd-insw06
+                          - tlnw-prd-insw07
+
+    volumeClaimTemplates:
+      - name: clickhouse-storage-template
+        spec:
+          storageClassName: "hpe-rwo"
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 500Gi
