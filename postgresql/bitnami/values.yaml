@@ -1,0 +1,27 @@
+global:
+  postgresql:
+    auth:
+      password: ""
+      postgresPassword: ""
+      username: "sonarqube"
+      database: "sonarqube"
+
+image:
+  registry: registry-1.docker.io
+  repository: bitnamilegacy/postgresql
+  tag: 17.6.0
+
+persistence:
+  enabled: true
+  storageClass: "hpe-rwx"
+  accessMode: "ReadWriteOnce"
+  size: "8Gi"
+
+primary:
+  resources:
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
