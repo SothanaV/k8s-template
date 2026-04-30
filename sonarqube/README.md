@@ -1,5 +1,5 @@
 # Sonarqube
-
+- install postgresql first
 - add helm repo
 ```
 helm repo add sonarqube https://SonarSource.github.io/helm-chart-sonarqube
@@ -24,8 +24,18 @@ sonarqube/sonarqube     10.7.0+3598     25.12.0.109743          Code quality and
 - install
 ```
 helm install sonarqube sonarqube/sonarqube \
+  --version 2026.2.1 \
   --namespace sonarqube \
   --create-namespace \
+  --set monitoringPasscode=passcode \
+  -f values.yml
+```
+
+- update
+```
+helm upgrade sonarqube sonarqube/sonarqube \
+  --version 2026.2.1 \
+  --namespace sonarqube \
   --set monitoringPasscode=passcode \
   -f values.yml
 ```
@@ -55,3 +65,31 @@ kubectl delete pvc --all -n sonarqube
 | `resources.requests.cpu` | `400m` | CPU request |
 | `resources.requests.memory` | `2048M` | Memory request |
 | `monitoringPasscode` | *(set at install)* | Passcode for monitoring endpoint |
+
+## deploy on subpath
+1. update env
+```yml
+containers:
+  - name: sonarqube
+    env:
+      - name: SONAR_WEB_CONTEXT
+        value: /sonarqube
+    readinessProbe:
+      exec:
+        command:
+        ...
+         http://localhost:9000/sonarqube/api/system/status
+```
+2. update ingress
+```yml
+metadata:
+  annotations:
+     nginx.ingress.kubernetes.io/rewrite-target: /sonarqube/$2
+
+spec:
+  rules:
+    - host: sonarqube.xxx.com
+      http:
+          paths:
+            - path: /sonarqube(/|$)(.*)
+              pathType: ImplementationSpecific

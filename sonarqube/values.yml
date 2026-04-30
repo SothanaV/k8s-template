@@ -94,3 +94,9 @@ persistence:
 emptyDir:
   {}
 terminationGracePeriodSeconds: 10
+
+jdbcOverwrite:
+  enabled: true
+  jdbcUrl: "jdbc:postgresql://postgresql/sonarqube"
+  jdbcUsername: "sonarqube"
+  jdbcPassword: ""
