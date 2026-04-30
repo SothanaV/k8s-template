@@ -67,3 +67,42 @@ initContainers:
     securityContext:
       runAsUser: 0 # run as root to change ownership
 ```
+
+# Connect ingress via subpath
+1. update env in api server
+```yml
+...
+containers:
+  - name: api-server
+  ...
+    env:
+      - name: AIRFLOW__API__BASE_URL
+        value: https://xxx.yyy.com/airflow/
+...
+```
+
+2. create ingress
+```yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: airflow-api
+  namespace: airflow
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - xxx.yyy.com
+  rules:
+    - host: xxx.yyy.com
+      http:
+        paths:
+          - path: /airflow/
+            pathType: Prefix
+            backend:
+              service:
+                name: airflow-api-server
+                port:
+                  number: 8080
+
+```

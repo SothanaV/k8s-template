@@ -2,11 +2,12 @@ airflowVersion: "3.0.6"
 defaultAirflowTag: "3.0.6"
 executor: KubernetesExecutor
 registry:
-  secretName: gitlab
+  secretName: reg-secret
 logs:
   persistence:
     enabled: true
-    size: 10Gi  # Adjust based on your needs
+    storageClassName: hpe-rwx
+    size: 50Gi  # Adjust based on your needs
 securityContext:
   runAsUser: 50000
   fsGroup: 1001
@@ -15,13 +16,13 @@ postgresql:
     repository: bitnamilegacy/postgresql
 images:
   airflow:
-    repository: registry.gitlab.com/...
-    tag: latest
+    repository: reg.xxx.yyy/repo
+    tag: production
     pullPolicy: Always
   useDefaultImageForMigration: true
   pod_template:
-    repository: registry.gitlab.com/...
-    tag: latest
+    repository: reg.xxx.yyy/repo
+    tag: production
     pullPolicy: Always
 
 dagProcessor:
@@ -55,16 +56,19 @@ apiServer:
     # AUTH_TYPE = AUTH_OAUTH
     AUTH_TYPE = AUTH_DB
     OAUTH_PROVIDERS = [{
-        'name':'dsm',
+        'name':'moma',
         'token_key':'access_token',
         'icon':'fa-lock',
             'remote_app': {
-                'api_base_url':'http://oauth.dataplatform:18000/api/v1/account/me/',
-                'access_token_url':'http://oauth.dataplatform:18000/o/token/',
-                'authorize_url':'https://oauth-dev-ins.tlnw.magnecomp.com/o/authorize',
+                'api_base_url':'https://oauth-prd-ins.yyy.com/api/v1/account/me/',
+                'access_token_url':'http://oauth-prd-ins.yyy.com/o/token/',
+                'authorize_url':'https://oauth-prd-ins.yyy.com/o/authorize',
                 'request_token_url': None,
                 'client_id': "",
                 'client_secret': "",
+                'client_kwargs': {
+                    'verify': False
+                }
             }
     }]
 
@@ -76,14 +80,14 @@ apiServer:
             pass
 
         def get_oauth_user_info(self, provider, response=None):
-            if provider == "dsm":
+            if provider == "moma":
                 config = {}
                 for elm in OAUTH_PROVIDERS:
-                    if elm.get('name') == 'dsm':
+                    if elm.get('name') == 'moma':
                         config = elm.get('remote_app')
                 res = requests.get(config.get('api_base_url'), headers={
                     'Authorization': f"{response.get('token_type')} {response.get('access_token')}"
-                })
+                }, verify=False)
                 if res.status_code!=200:
                     print(res.text)
                     return {}
@@ -99,7 +103,7 @@ apiServer:
                 return parsed_token
             return {}
 
-    # SECURITY_MANAGER_CLASS = CustomSecurity
+    SECURITY_MANAGER_CLASS = CustomSecurity if AUTH_TYPE == AUTH_OAUTH else None
     AUTH_USER_REGISTRATION = True
     AUTH_ROLES_SYNC_AT_LOGIN = True
     AUTH_USER_REGISTRATION_ROLE = "Admin"
