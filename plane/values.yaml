@@ -1,0 +1,42 @@
+planeVersion: v1.3.0
+
+ingress:
+  enabled: true
+  appHost: "wn-a-prd-ai-k8s.tlnw.magnecomp.com"
+  ingressClass: "nginx"
+  ingress_annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "20m"
+
+redis:
+  storageClass: "hpe-rwo"
+
+postgres:
+  storageClass: "hpe-rwo"
+
+rabbitmq:
+  storageClass: "hpe-rwo"
+
+minio:
+  storageClass: "hpe-rwo"
+  volumeSize: 10Gi
+
+web:
+  pullPolicy: IfNotPresent
+
+space:
+  pullPolicy: IfNotPresent
+
+admin:
+  pullPolicy: IfNotPresent
+
+live:
+  pullPolicy: IfNotPresent
+
+api:
+  pullPolicy: IfNotPresent
+
+worker:
+  pullPolicy: IfNotPresent
+
+beatworker:
+  pullPolicy: IfNotPresent
