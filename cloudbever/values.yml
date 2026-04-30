@@ -9,4 +9,15 @@ ingress:
   annotations:
     nginx.org/websocket-services: cloudbeaver
 persistence:
-  storageClass: ""
+  storageClass: "hpe-rwo"
+
+resources:
+  requests:
+    cpu: 2
+    memory: 512Mi
+  limits:
+    cpu: 3
+    memory: 1024Mi
+
+# extraEnvVars:
+#   - name: CB

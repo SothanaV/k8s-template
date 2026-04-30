@@ -30,3 +30,30 @@ helm install cloudbeaver avisto/cloudbeaver --namespace cloudbever --create-name
 helm uninstall cloudbeaver --namespace cloudbever
 kubectl delete pvc --all -n cloudbever
 ```
+
+# if deploy subpath
+1. update deployment
+```yml
+containers:
+    - name: cloudbeaver
+    env:
+      - name: CLOUDBEAVER_ROOT_URI
+        value: /cloudbeaver 
+```
+
+2. update ingress
+```yml
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: xxx.yyy.com
+      http:
+        paths:
+          - path: /cloudbeaver
+            pathType: Prefix
+            backend:
+              service:
+                name: cloudbeaver
+                port:
+                  name: http
+```
