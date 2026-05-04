@@ -1,0 +1,19 @@
+# Sensitive configuration files
+values.yaml
+oauth/values.yaml
+oauth/provider.yaml
+*.secret
+*.env
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Generated/templated files that contain secrets
+secrets.yaml
+*-secret.yaml
+
+# Local overrides
+local-values.yaml
+override-values.yaml

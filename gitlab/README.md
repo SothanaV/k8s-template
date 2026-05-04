@@ -24,7 +24,7 @@ gitlab/gitlab   8.9.4           v18.9.4         Web-based DevOps lifecycle tool
 kubectl create namespace gitlab
 ```
 
-- create secrets
+- create secrets (replace with your secure values)
 ```
 kubectl create secret generic gitlab-postgresql-password -n gitlab \
   --from-literal=postgresql-password="YOUR_SECURE_DB_PASSWORD"
@@ -33,7 +33,7 @@ kubectl create secret generic gitlab-redis-secret -n gitlab \
   --from-literal=redis-password="YOUR_SECURE_REDIS_PASSWORD"
 ```
 
-- edit `values.yaml`
+- configure `values.yaml` with your environment settings
 
 - install
 ```
@@ -82,3 +82,13 @@ kubectl delete namespace gitlab
 | `gitlab.webservice.minReplicas` | `2` | Min webservice replicas |
 | `gitlab.webservice.maxReplicas` | `10` | Max webservice replicas |
 | `nginx-ingress.enabled` | `false` | Disable bundled nginx (use external) |
+
+## Sensitive Files
+
+The following files are gitignored and contain sensitive configuration:
+
+- `values.yaml` - Main Helm values (domain, storage class, replicas)
+- `oauth/values.yaml` - OAuth configuration values
+- `oauth/provider.yaml` - OAuth provider credentials (app_id, app_secret)
+
+> **Warning**: Never commit `values.yaml`, `oauth/values.yaml`, or `oauth/provider.yaml` to version control. Copy `.gitignore` and update with your sensitive file paths.
