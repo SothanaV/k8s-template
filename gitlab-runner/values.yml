@@ -1,19 +1,36 @@
-runnerToken: ""
-gitlabUrl: "https://gitlab.com"
+runnerToken: "<RUNNER_TOKEN>"
+gitlabUrl: "<GITLAB_URL>"
 rbac:
   create: true
 serviceAccount:
   create: true
   name: gitlabrunner-service-account
 
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - node1
+                - node2
+
+# === GitLab Runner Job Pod Scheduling ===
+# Control where CI/CD job pods run
 runners:
   config: |
     [[runners]]
+      # Disable SSL verification for GitLab server (useful for self-signed certs)
+      gitlab_server_ssl_verify = false
+      
       [runners.kubernetes]
         namespace = "{{ default .Release.Namespace .Values.runners.jobNamespace }}"
         image = "alpine"
         privileged = true
         poll_timeout = 600
+        
         [[runners.kubernetes.volumes.host_path]]
           name = "docker"
           mount_path = "/var/run/docker.sock"
