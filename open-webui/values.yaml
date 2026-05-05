@@ -1,0 +1,43 @@
+# Open WebUI Helm Values
+# Update the placeholders below with your actual values before deploying
+
+ollama:
+  enabled: false
+
+pipelines:
+  enabled: false
+
+image:
+  repository: ghcr.io/open-webui/open-webui
+  tag: 0.9.2
+
+# image:
+#   repository: "reg.magnecomp.com/xxx/open-webui"
+#   tag: development-1180
+
+# imagePullSecrets:
+#   - name: "<your-image-pull-secret>"
+
+workload:
+  kind: "Deployment"
+
+ingress:
+  enabled: true
+  class: nginx
+  host: "<your-domain.example.com>"
+  tls: true
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/websocket-services: open-webui
+
+persistence:
+  enabled: true
+  accessMode: ReadWriteMany
+  storageClass: "<your-storage-class>"
+  size: 10Gi
+
+enableOpenaiApi: false
+
+databaseUrl: postgresql://<user>:<password>@<host>:5432/<dbname>
+# NOTE: Use Kubernetes Secrets for sensitive database credentials instead of plain text
