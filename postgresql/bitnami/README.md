@@ -28,7 +28,7 @@ helm search repo bitnami/postgresql --versions
 ### Install with custom values
 
 ```bash
-helm install postgresql bitnami/postgresql --version 18.5.1 --namespace sonarqube -f values.yaml
+helm install postgresql bitnami/postgresql --version 18.5.1 --namespace <namespace> -f values.yaml
 ```
 
 ## Configuration
@@ -37,8 +37,8 @@ helm install postgresql bitnami/postgresql --version 18.5.1 --namespace sonarqub
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| `global.postgresql.auth.username` | `sonarqube` | Custom PostgreSQL username |
-| `global.postgresql.auth.database` | `sonarqube` | Custom database name |
+| `global.postgresql.auth.username` | `postgres` | Custom PostgreSQL username |
+| `global.postgresql.auth.database` | `postgres` | Custom database name |
 | `image.registry` | `registry-1.docker.io` | Docker image registry |
 | `image.repository` | `bitnamilegacy/postgresql` | PostgreSQL image repository |
 | `image.tag` | `17.6.0` | PostgreSQL image tag |
@@ -56,8 +56,8 @@ The following environment variables will be available for connecting to PostgreS
 
 | Variable | Value |
 |----------|-------|
-| `POSTGRES_USERNAME` | `sonarqube` |
-| `POSTGRES_DATABASE` | `sonarqube` |
+| `POSTGRES_USERNAME` | `postgres` |
+| `POSTGRES_DATABASE` | `postgres` |
 | `POSTGRES_PORT` | `5432` |
 | `POSTGRES_HOST` | `postgresql` |
 
@@ -80,10 +80,10 @@ CPU and memory resources are configured as follows:
 ## Uninstall
 
 ```bash
-helm uninstall postgresql --namespace sonarqube
+helm uninstall postgresql --namespace <namespace>
 ```
 
 ## Upgrading
 
 ```bash
-helm upgrade postgresql bitnami/postgresql --version 18.5.1 --namespace sonarqube -f values.yaml
+helm upgrade postgresql bitnami/postgresql --version 18.5.1 --namespace <namespace> -f values.yaml
