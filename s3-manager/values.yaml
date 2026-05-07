@@ -1,4 +1,4 @@
-nameOverride: "" # use when install in same namespace
+nameOverride: "mc" # use when install in same namespace
 replicaCount: 1
 
 image:
@@ -15,21 +15,35 @@ ports:
 ingress:
   enabled: true
   className: nginx
-  annotations: {}
+  # # if subdomain is used, the host should be like: subdomain.domain.com
+  # annotaions: {}
+
+  # if path is used, the host should be like: domain.com, and the path should be like: /subpath
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/use-regex: 'true'
   hosts:
-    - host: bucket.xxx.com
+    - host: wn-a-prd-ai-k8s.tlnw.magnecomp.com
       paths:
-        - path: /
-          pathType: Prefix
+        # # if subdomain is used, the path should be like: /
+        # - path: /
+        #   pathType: Prefix
+        #   port: 80
+        # if path is used, the path should be like: /subpath(/|$)(.*)
+        - path: /s3-manager/mc(/|$)(.*)
+          pathType: ImplementationSpecific
           port: 80
-  tls: []
 
 configMap:
   enabled: true
   data:
-    ENDPOINT: "minio:9000"
-    ACCESS_KEY_ID: "admin"
-    SECRET_ACCESS_KEY: "qwer1234"
-    USE_SSL: "false"
+    ENDPOINT: "<ENDPOINT_URL>"
+    ACCESS_KEY_ID: "<YOUR_ACCESS_KEY_ID>"
+    SECRET_ACCESS_KEY: "<YOUR_SECRET_ACCESS_KEY>"
+    USE_SSL: "true"
+    # if path is used, the ROOT_URL should be like: /subpath
+    ROOT_URL: "/s3-manager/mc"
+    # # if subdomain is used, the ROOT_URL should be like: /
+    # ROOT_URL: "/"
 
 
