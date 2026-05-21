@@ -1,0 +1,20 @@
+replicaCount: 1
+
+image:
+  repository: docker.io/qdrant/qdrant
+  pullPolicy: IfNotPresent
+  tag: ""
+  useUnprivilegedImage: false
+
+resources:
+  limits:
+    cpu: 8000m
+    memory: 4Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+persistence:
+  storageClass: "hpe-rwo"
+  accessMode: ["ReadWriteOnce"]
+  size: 10Gi
