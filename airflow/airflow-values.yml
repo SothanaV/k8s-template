@@ -53,21 +53,21 @@ apiServer:
     # Flask-WTF flag for CSRF
     WTF_CSRF_ENABLED = True
 
-    # AUTH_TYPE = AUTH_OAUTH
-    AUTH_TYPE = AUTH_DB
+    AUTH_TYPE = AUTH_OAUTH
+    #AUTH_TYPE = AUTH_DB
     OAUTH_PROVIDERS = [{
         'name':'moma',
         'token_key':'access_token',
         'icon':'fa-lock',
             'remote_app': {
-                'api_base_url':'https://oauth-prd-ins.yyy.com/api/v1/account/me/',
-                'access_token_url':'http://oauth-prd-ins.yyy.com/o/token/',
-                'authorize_url':'https://oauth-prd-ins.yyy.com/o/authorize',
+                'api_base_url':'https://xxx.com/api/v1/account/me/',
+                'access_token_url':'https://xxx.com/o/token/',
+                'authorize_url':'https://xxx.com/o/authorize',
                 'request_token_url': None,
                 'client_id': "",
                 'client_secret': "",
                 'client_kwargs': {
-                    'verify': False
+                  'verify': False
                 }
             }
     }]
@@ -76,34 +76,54 @@ apiServer:
     class CustomSecurity(FabAirflowSecurityManagerOverride):
         
         def sync_roles(self):
-            # Custom logic or possibly skipping the sync altogether
-            pass
+            super().sync_roles()
 
         def get_oauth_user_info(self, provider, response=None):
             if provider == "moma":
-                config = {}
-                for elm in OAUTH_PROVIDERS:
-                    if elm.get('name') == 'moma':
-                        config = elm.get('remote_app')
+                config = OAUTH_PROVIDERS[0].get('remote_app', {})
                 res = requests.get(config.get('api_base_url'), headers={
                     'Authorization': f"{response.get('token_type')} {response.get('access_token')}"
                 }, verify=False)
-                if res.status_code!=200:
+                
+                if res.status_code != 200:
                     print(res.text)
                     return {}
+                
                 me = res.json()
                 print(me)
+                
+                # Extract the flat list of roles from your JSON payload
+                # Defaults to an empty list if "roles" isn't found
+                user_roles = me.get("roles", []) 
+
+                for role_name in user_roles:
+                    # 1. Check if the role exists in the Airflow database
+                    if not self.find_role(role_name):
+                        # Create the role if it doesn't exist
+                        self.add_role(role_name)
+                        print(f"Created new role on the fly: {role_name}")
+                    
+                    # 2. Dynamically update the mapping so FAB assigns it to the user
+                    # This maps the API role string to the Airflow role string 1:1
+                    if role_name not in self.auth_roles_mapping:
+                        self.auth_roles_mapping[role_name] = [role_name]
+
                 parsed_token = {
-                    "email": me["email"],
-                    "first_name": me["first_name"],
-                    "last_name": me["last_name"],
-                    "username": me["username"],
-                    "role_keys": ["Admin", "Viewer"],
+                    "email": me.get("email"),
+                    "first_name": me.get("first_name"),
+                    "last_name": me.get("last_name"),
+                    "username": me.get("username"),
+                    "role_keys": user_roles, # Will pass ["IT", "DataUser"] to FAB
                 }
                 return parsed_token
             return {}
 
-    SECURITY_MANAGER_CLASS = CustomSecurity if AUTH_TYPE == AUTH_OAUTH else None
+    SECURITY_MANAGER_CLASS = CustomSecurity
     AUTH_USER_REGISTRATION = True
     AUTH_ROLES_SYNC_AT_LOGIN = True
-    AUTH_USER_REGISTRATION_ROLE = "Admin"
+    AUTH_USER_REGISTRATION_ROLE = "Public"
+
+    AUTH_ROLES_MAPPING = {
+        "MOM Analytics Platform (5100)": ["Admin"],       # Gives "IT" full Admin access in Airflow
+        "DataUser": ["Public"],  # Gives "DataUser" standard User access (or use "Viewer")
+    }
