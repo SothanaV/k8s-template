@@ -6,8 +6,14 @@
 ```
 kubectl create namespace airflow
 ```
-1. create gitlab secret
-    - edit `secret-gitlab.yml`
+1. create gitlab registry secret
+    - generate the dockerconfigjson from a machine that has run
+      `docker login registry.gitlab.com`:
+      ```
+      base64 -w0 ~/.docker/config.json
+      ```
+    - put the output in `secret-gitlab.yml` (keep real values in
+      `secret-gitlab.local.yaml`, which is gitignored)
     - apply secret
     ```
     kubectl apply -f secret-gitlab.yml

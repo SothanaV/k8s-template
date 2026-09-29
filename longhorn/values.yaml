@@ -4,4 +4,4 @@ persistence:
 
 ingress:
   enabled: true
-  host: longhorn.xxx.com
+  host: longhorn-infra.tlnw.magnecomp.com

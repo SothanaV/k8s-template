@@ -24,8 +24,13 @@ console:
     hostname: minio.local
 
 auth:
-  rootUser: admin
-  rootPassword: "qwer1234!@#$"
+  # Credentials are read from an existing Secret (keys: root-user,
+  # root-password). Create it before installing:
+  #   kubectl -n minio create secret generic minio-root-secret \
+  #     --from-literal=root-user=admin \
+  #     --from-literal=root-password="<MINIO_ROOT_PASSWORD>"
+  # Local copy of the real value: values.local.yaml
+  existingSecret: minio-root-secret
 
 mode: "distributed"
 

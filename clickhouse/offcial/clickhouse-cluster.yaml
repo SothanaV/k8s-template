@@ -7,13 +7,16 @@ spec:
     templates:
       podTemplate: clickhouse-pod-template
       dataVolumeClaimTemplate: clickhouse-storage-template
-      
+
   configuration:
     users:
-      # Note: For production, it's safer to use secrets, 
-      # but this matches your password request.
-      admin/password: "6ZHFKF9NhkC5qHSA9xLbj93fIYdQRSnMnebkU7LHeF1kfZ9iP9iPdK47D3j3FA4c"
-    
+      # Password comes from the `clickhouse-admin-password` Secret
+      # (key: password). Create the Secret before applying this manifest.
+      # Local copy of the real value: clickhouse-cluster.local.yaml
+      admin/password: "<CLICKHOUSE_ADMIN_PASSWORD>"
+      admin/profile: default_user
+      admin/quota: default
+
     # Custom XML Configs
     settings:
       # Equivalent to your logs.xml config
@@ -25,7 +28,7 @@ spec:
         layout:
           shardsCount: 1
           replicasCount: 3
-    
+
     # ClickHouse Keeper Configuration
     zookeeper:
       nodes:

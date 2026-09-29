@@ -19,6 +19,17 @@ helm repo update
 
 ## Installation
 
+### Create the password Secret
+
+`values.yaml` reads credentials from an existing Secret
+(`global.postgresql.auth.existingSecret`):
+
+```bash
+kubectl create secret generic postgresql-secret --namespace <namespace> \
+  --from-literal=postgres-password="<POSTGRES_SUPERUSER_PASSWORD>" \
+  --from-literal=password="<POSTGRES_PASSWORD>"
+```
+
 ### Search available versions
 
 ```bash
@@ -37,12 +48,13 @@ helm install postgresql bitnami/postgresql --version 18.5.1 --namespace <namespa
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
+| `global.postgresql.auth.existingSecret` | `postgresql-secret` | Secret holding `password` / `postgres-password` |
 | `global.postgresql.auth.username` | `postgres` | Custom PostgreSQL username |
 | `global.postgresql.auth.database` | `postgres` | Custom database name |
 | `image.registry` | `registry-1.docker.io` | Docker image registry |
 | `image.repository` | `bitnamilegacy/postgresql` | PostgreSQL image repository |
 | `image.tag` | `17.6.0` | PostgreSQL image tag |
-| `persistence.storageClass` | `hpe-rwx` | PVC storage class |
+| `persistence.storageClass` | `hpe-rwo` | PVC storage class |
 | `persistence.accessMode` | `ReadWriteOnce` | PVC access mode |
 | `persistence.size` | `8Gi` | PVC storage size |
 | `primary.resources.limits.cpu` | `500m` | CPU limit |
@@ -65,7 +77,7 @@ The following environment variables will be available for connecting to PostgreS
 
 Data is persisted using a PVC with the following configuration:
 
-- **Storage Class:** `hpe-rwx`
+- **Storage Class:** `hpe-rwo`
 - **Access Mode:** `ReadWriteOnce`
 - **Size:** `8Gi`
 - **Mount Path:** `/bitnami/postgresql`

@@ -44,7 +44,11 @@ persistence:
 
 auth:
   username: admin
-  password: xxx
+  # Password is read from an existing Secret (key: admin-password).
+  # Create it before installing:
+  #   kubectl -n clickhouse create secret generic clickhouse-secret \
+  #     --from-literal=admin-password="<CLICKHOUSE_ADMIN_PASSWORD>"
+  existingSecret: clickhouse-secret
 
 resources:
   limits:

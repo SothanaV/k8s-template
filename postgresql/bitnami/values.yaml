@@ -1,8 +1,13 @@
 global:
   postgresql:
     auth:
-      password: "postgres"
-      postgresPassword: "postgres"
+      # Passwords are read from an existing Secret (keys: password,
+      # postgres-password). Create it before installing:
+      #   kubectl -n <namespace> create secret generic postgresql-secret \
+      #     --from-literal=password="<POSTGRES_PASSWORD>" \
+      #     --from-literal=postgres-password="<POSTGRES_SUPERUSER_PASSWORD>"
+      # Local copy of the real value: values.local.yaml
+      existingSecret: postgresql-secret
       username: "postgres"
       database: "postgres"
 

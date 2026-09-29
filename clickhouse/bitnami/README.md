@@ -19,7 +19,14 @@ bitnami/clickhouse              9.4.2           25.7.3          ClickHouse is an
 bitnami/clickhouse              9.4.1           25.7.2          ClickHouse is an open-source column-oriented OL...
 ```
 
-- edit `values.yml`
+- create the password Secret (the chart reads it via `auth.existingSecret`)
+```
+kubectl create namespace clickhouse --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic clickhouse-secret -n clickhouse \
+  --from-literal=admin-password="<CLICKHOUSE_ADMIN_PASSWORD>"
+```
+
+- edit `values.yaml`
 - install
 ```
 helm install clickhouse bitnami/clickhouse --namespace clickhouse --create-namespace --version 9.4.4 -f values.yaml

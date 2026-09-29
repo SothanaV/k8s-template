@@ -20,7 +20,15 @@ bitnami/minio           17.0.15         2025.7.18       MinIO(R) is an object st
 bitnami/minio           17.0.14         2025.6.13       MinIO(R) is an object storage server, compatibl...
 ```
 
-- edit `values.yml`
+- create the root credentials Secret (the chart reads it via `auth.existingSecret`)
+```
+kubectl create namespace minio --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic minio-root-secret -n minio \
+  --from-literal=root-user=admin \
+  --from-literal=root-password="<MINIO_ROOT_PASSWORD>"
+```
+
+- edit `values.yaml`
 - install
 ```
 helm install minio bitnami/minio --namespace minio --create-namespace --version 17.0.21 -f values.yaml

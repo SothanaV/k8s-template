@@ -56,4 +56,4 @@ helm install longhorn longhorn/longhorn \
 | `persistence.defaultClassReplicaCount` | `2` | Number of replicas for default storage class |
 | `persistence.defaultDataLocality` | `best-effort` | Data locality policy (`disabled`, `best-effort`, `strict-local`) |
 | `ingress.enabled` | `true` | Enable Longhorn UI ingress |
-| `ingress.host` | `longhorn.xxx.com` | Hostname for Longhorn UI |
+| `ingress.host` | `longhorn-infra.tlnw.magnecomp.com` | Hostname for Longhorn UI |

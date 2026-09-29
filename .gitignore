@@ -1,0 +1,13 @@
+# Local copies of real credentials — never commit
+*.local.yaml
+*.local.yml
+*.local
+
+# Basic-auth htpasswd files
+auth
+
+# Sensitive environment files and backups
+*.env
+*.bak
+*.backup
+*.old
