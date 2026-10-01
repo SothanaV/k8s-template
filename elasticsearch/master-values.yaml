@@ -1,0 +1,22 @@
+clusterName: "production-es"
+nodeGroup: "master"
+replicas: 3
+antiAffinity: "hard"
+
+roles:
+  - master
+
+esJavaOpts: "-Xmx2g -Xms2g"
+resources:
+  requests:
+    cpu: "1000m"
+    memory: "2Gi"
+  limits:
+    cpu: "2000m"
+    memory: "4Gi"
+
+volumeClaimTemplate:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi

@@ -1,0 +1,23 @@
+clusterName: "production-es"
+nodeGroup: "data"
+replicas: 4
+antiAffinity: "soft"
+
+roles:
+  - data
+  - ingest
+
+esJavaOpts: "-Xmx16g -Xms16g"
+resources:
+  requests:
+    cpu: "4000m"
+    memory: "8Gi"
+  limits:
+    cpu: "8000m"
+    memory: "12Gi"
+
+volumeClaimTemplate:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 50Gi

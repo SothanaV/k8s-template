@@ -1,0 +1,30 @@
+clusterName: "production-es"
+nodeGroup: "master"
+
+# Node count & distribution
+replicas: 3
+antiAffinity: "hard" # Enforces scheduling pods on separate physical Kubernetes worker nodes
+
+# Node roles (Elasticsearch 8.x syntax)
+roles:
+  - master
+  - data
+  - ingest
+
+# Memory sizing (Heap = 50% of container memory)
+esJavaOpts: "-Xmx4g -Xms4g"
+resources:
+  requests:
+    cpu: "2000m"
+    memory: "8Gi"
+  limits:
+    cpu: "4000m"
+    memory: "8Gi"
+
+# Persistent storage per node
+volumeClaimTemplate:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: "longhorn" # Replace with your cluster's StorageClass
+  resources:
+    requests:
+      storage: 100Gi
