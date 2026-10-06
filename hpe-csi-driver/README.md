@@ -1,7 +1,8 @@
 # HPE CSI Driver
 
 CSI driver for HPE Alletra/Primera/3PAR arrays. Provides the `hpe-rwo`
-(RWO) storage class used by most services in this repo.
+(RWO) and `hpe-rwx` (RWX, via NFS) storage classes used by services in
+this repo.
 
 The Container Storage Orchestrator (CSO) docs call this the `hpe-csi-driver`
 chart from the `hpe-storage` repo.
@@ -13,10 +14,24 @@ chart from the `hpe-storage` repo.
 | `values.yaml` | Chart overrides (Alletra6000 enabled, image pins, resources) |
 | `default-values.yaml` | Full upstream defaults (`helm show values`) |
 | `secret.yaml` | `hpe-backend` Secret template — **edit placeholders before apply** |
-| `storage-class.yaml` | `hpe-rwo` StorageClass (xfs, expandable, `Delete` reclaim) |
+| `storage-class.yaml` | `hpe-rwo` + `hpe-rwx` StorageClasses (ext4, iSCSI, expandable, `Delete` reclaim) |
+| `test-deploy.yaml` | Smoke test: PVC (`hpe-rwx`) + nginx Deployment writing to `/data` |
+| `report.md` / `report.pdf` | Incident report: provisioning failure caused by cluster DNS loss (placeholders for infra names/IPs) |
 
 > **Warning**: `secret.yaml` ships with `<PLACEHOLDER>` values. Keep real
 > array credentials in a gitignored `secret.local.yaml` copy.
+
+## Storage classes
+
+Both classes use provisioner `csi.hpe.com`, `accessProtocol: iscsi`,
+`fstype: ext4`, `allowVolumeExpansion: true`, `reclaimPolicy: Delete`, and
+reference the `hpe-backend` Secret (namespace `hpe-storage`) for all four
+secret hooks (provision / node-stage / node-publish / expand).
+
+| Class | Access | Notes |
+|-------|--------|-------|
+| `hpe-rwo` | ReadWriteOnce | Block (iSCSI/multipath). Pin Deployment to `strategy: Recreate` |
+| `hpe-rwx` | ReadWriteMany | `nfsResources: "true"` — CSI creates backing NFS exports |
 
 ## Installation
 
@@ -50,7 +65,7 @@ helm install hpe-csi-driver hpe-storage/hpe-csi-driver \
   -f values.yaml
 ```
 
-### 5. Create the StorageClass
+### 5. Create the StorageClasses (rwo + rwx)
 
 ```bash
 kubectl apply -f storage-class.yaml
@@ -69,6 +84,35 @@ Check the backend registered with CSP:
 ```bash
 kubectl get hpebackend -n hpe-storage -o wide
 ```
+
+Smoke test (nginx pod writing to `/data`):
+
+```bash
+kubectl apply -f test-deploy.yaml
+kubectl get pvc,po -l app=my-app -w
+kubectl delete -f test-deploy.yaml
+```
+
+## Known issue: DNS dependency in the storage path
+
+The CSP login uses `http://<serviceName>:8080` from the `hpe-backend`
+Secret, and the CSP resolves the array FQDN itself — so provisioning
+depends fully on cluster DNS (no fallback). See `report.md` for an incident
+where broken cross-node DNS left pods stuck in `Pending`.
+
+On affected clusters the Secret was patched to IP literals as a workaround:
+
+```bash
+kubectl patch secret hpe-backend -n hpe-storage --type merge \
+  -p '{"data":{"serviceName":"'"$(printf '<CSP_SVC_CLUSTER_IP>' | base64)"'"}}'
+kubectl patch secret hpe-backend -n hpe-storage --type merge \
+  -p '{"data":{"backend":"'"$(printf '<ARRAY_MGMT_IP>' | base64)"'"}}'
+kubectl rollout restart deploy/hpe-csi-controller -n hpe-storage
+```
+
+> **Warning**: this patch lives outside Helm. A `helm upgrade/rollback` of
+> the CSI release reverts the Secret to `values`/manifest content and
+> re-breaks provisioning until patched again.
 
 ## Upgrade
 

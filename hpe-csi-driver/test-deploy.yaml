@@ -1,0 +1,50 @@
+# app.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-data
+  namespace: default          # must match the Deployment namespace
+  labels:
+    app: my-app
+spec:
+  accessModes:
+    - ReadWriteOnce           # "rwo" = single node read/write
+  storageClassName: hpe-rwx
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+  namespace: default
+  labels:
+    app: my-app
+spec:
+  replicas: 1                 # RWO volume → 1 replica unless you pin pods to one node
+  strategy:
+    type: Recreate            # avoids a stuck rollout: old pod must release the disk first
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        - name: my-app
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: app-data
