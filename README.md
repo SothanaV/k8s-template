@@ -11,7 +11,7 @@ Helm chart templates and custom values for self-hosted Kubernetes services.
 | [Longhorn](longhorn/README.md) | Distributed block storage | `longhorn-system` |
 | [HPE CSI Driver](hpe-csi-driver/README.md) | HPE Alletra CSI driver (`hpe-rwo` storage class) | `hpe-storage` |
 | [MinIO](minio/README.md) | S3-compatible object storage | `minio` |
-| [PostgreSQL](postgresql/bitnami/README.md) | Relational database (Bitnami chart) | *(per app)* |
+| [PostgreSQL](postgresql/README.md) | Relational database — custom chart (`postgres:18-alpine`) or Bitnami chart | *(per app)* |
 | [Airflow](airflow/README.md) | Workflow orchestration | `airflow` |
 | [ClickHouse](clickhouse/README.md) | Column-oriented analytics database | `clickhouse` |
 | [CloudBeaver](cloudbever/README.md) | Web-based database manager | `cloudbever` |

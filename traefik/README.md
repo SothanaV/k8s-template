@@ -95,6 +95,24 @@ Expected output: 3 `traefik-private` pods `Running`, the `traefik-private`
 Service of type `NodePort` on `80:32080, 443:32443`, and the IngressClass
 `traefik-private` with controller `traefik.io/ingress-controller`.
 
+Then check the `targetPort`s. `get svc` prints `80:32080, 443:32443` identically
+whether `targetPort` is `web` or the literal `80`, but only `web`/`websecure`
+point at the ports Traefik listens on (`8000`/`8443`):
+
+```bash
+kubectl -n traefik-private get svc traefik-private \
+  -o jsonpath='{range .spec.ports[*]}{.name}={.targetPort} {" "}{end}{"\n"}'
+```
+
+Expected output: `web=web websecure=websecure`. Port `name: http`/`https` or
+`targetPort: 80`/`443` means someone edited the Service outside Helm — every
+NodePort connection then fails with `connection refused`. See
+[Troubleshooting](#troubleshooting).
+
+> **Warning**: The `targetPort` and port `name` fields are the usual casualties
+> of editing this Service in Lens or with `kubectl edit`. A values-based
+> `helm upgrade` is the only fix; re-editing brings the outage back.
+
 Confirm the providers Traefik actually started with — the container args are the
 source of truth:
 
@@ -158,19 +176,42 @@ EOF
 curl -s -H "Host: whoami.example.local" http://<NODE_IP>:32080/
 ```
 
-Expected output: the whoami body listing `Hostname` and headers. Remove the
-test objects afterwards:
+Expected output: the whoami body listing `Hostname` and headers. **Use a worker
+node's IP: where the datacenter firewall opens service ports only on workers,
+control-plane IPs drop `3xxxx` traffic silently — a timeout, not a clean
+refusal.** Remove the test objects afterwards:
 
 ```bash
 kubectl -n traefik-private delete deploy,svc,ingress whoami
 ```
 
-Dashboard and `/ping` are on the `traefik` entry point (8080), which is
-intentionally not exposed by the Service. Reach it locally:
+`/ping` is on the `traefik` entry point (8080), which is intentionally not
+exposed by the Service. Reach it locally:
 
 ```bash
 kubectl -n traefik-private port-forward deploy/traefik-private 8080:8080
+curl -s http://127.0.0.1:8080/ping
 ```
+
+Expected output: `OK`. Use this to separate "Traefik is down" from "routing is
+wrong" — `/ping` answers even when no Ingress matches.
+
+**The dashboard and `/api/*` are dead with these values.** The chart ships
+`api.dashboard: true` but nothing else, which renders only
+`--api.dashboard=true`; Traefik then serves the dashboard on no entry point, so
+`/dashboard/` and `/api/overview` both return Traefik's own 404 body. Set
+`api.insecure: true` to bind the API to this entry point:
+
+```bash
+helm template t traefik/traefik --version 41.4.0 -n traefik-private -f values.yaml \
+  --set api.insecure=true | grep -- '--api'
+```
+
+Expected output: `--api.dashboard=true` and `--api.insecure=true`.
+
+> **Warning**: `api.insecure` serves the API and dashboard **without
+> authentication**. Keep it off in shared clusters — the Service does not expose
+> 8080, so port-forward is the safe access path when you do enable it.
 
 ---
 
@@ -268,8 +309,26 @@ kubectl delete ns traefik-private
 
 - **`helm: command 'update' is not valid`** — the correct form is
   `helm upgrade -i traefik-private traefik/traefik -n traefik-private --version 41.4.0 -f values.yaml`.
-- **App Ingress returns 404 "404 page not found"** — Ingress is not tagged with
-  the class, so the provider never loaded it. Check:
+- **404 but which 404?** — before anything else, tell Traefik's own 404 from the
+  backend's. Traefik's is `Content-Length: 19` ("404 page not found\n") with
+  `x-content-type-options: nosniff`; a backend 404 is `18` and carries the app's
+  own headers, e.g. `access-control-allow-*`. **A backend 404 means routing
+  works** — debug the app path, not Traefik.
+
+```bash
+curl -sS -D- -o /dev/null -H "Host: <APP_HOSTNAME>" http://<NODE_IP>:32080/
+```
+
+  To confirm a suspected backend 404, probe from inside the pod — the identical
+  response proves Traefik is innocent:
+
+```bash
+kubectl -n <APP_NS> exec deploy/<APP> -- sh -c 'wget -qO- -S http://127.0.0.1:<PORT>/'
+```
+
+- **404 with no backend headers, `Content-Length: 19`** — the Ingress was never
+  loaded by this controller, usually because it is not tagged with the class.
+  Check:
 
 ```bash
 kubectl get ingress -A --field-selector metadata.name=<INGRESS_NAME> \
@@ -284,9 +343,19 @@ kubectl get events -n traefik-private --sort-by=.lastTimestamp | grep -i nginx
 - **`kubectl describe ingress` shows no `Address`** — expected with
   `publishService.enabled: false`. Nothing is broken; the NodePort is the front
   end.
-- **HTTPS on 32443 fails with a certificate error** — Traefik answers with its
-  self-signed default certificate when no `spec.tls` secret matches the SNI.
-  Attach the existing wildcard TLS Secret in the app's namespace:
+- **HTTPS on 32443 fails with a certificate error** — Traefik answers with
+  `CN=TRAEFIK DEFAULT CERT` when no `spec.tls` secret matches the SNI. Read the
+  served cert instead of guessing:
+
+```bash
+echo | openssl s_client -connect <NODE_IP>:32443 -servername <APP_HOSTNAME> 2>/dev/null \
+  | openssl x509 -noout -subject -ext subjectAltName
+```
+
+  Three causes, in the order to rule them out:
+
+  1. Missing `spec.tls` on the Ingress, or the named Secret is absent from the
+     Ingress's own namespace (it must be same-namespace, not cluster-wide):
 
 ```yaml
 spec:
@@ -296,8 +365,81 @@ spec:
         - <APP_HOSTNAME>
 ```
 
-- **Connection refused on 32080/32443** — a `nodePort` collision or the node
-  firewall blocking the port. Endpoints first, then the port owner:
+  2. **The wildcard does not cover the host.** `*.tlnw.magnecomp.com` matches
+     `one-level.tlnw.magnecomp.com` but *not*
+     `api-app-ensaas.adv.tlnw.magnecomp.com` — a wildcard matches exactly one
+     label. Hosts living two levels below the wildcard's parent need their own
+     SAN or a second wildcard cert, otherwise Traefik falls back to its default
+     cert even though the Secret exists and is referenced correctly.
+  3. Malformed Secret — verify the pair actually matches:
+
+```bash
+kubectl -n <APP_NS> get secret <TLS_SECRET_NAME> -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/t.crt
+kubectl -n <APP_NS> get secret <TLS_SECRET_NAME> -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/t.key
+openssl x509 -noout -modulus -in /tmp/t.crt | openssl md5
+openssl rsa  -noout -modulus -in /tmp/t.key | openssl md5
+```
+
+  Expected output: identical MD5s. **Use `openssl x509 -modulus`, not
+  `openssl x509 -pubkey` — piping `x509 -pubkey` into `pkey -pubout` yields an
+  empty digest (`e3b0c442...`) and looks like a mismatch when the Secret is fine.**
+
+- **Connection refused on every `3xxxx` port, pods healthy and `Ready`** — almost
+  always a hand-edited Service: `targetPort` no longer points at the entry-point
+  ports (`web`/`8000`, `websecure`/`8443`), so kube-proxy DNATs to a closed port.
+  Read it, do not eyeball `get svc`:
+
+```bash
+kubectl -n traefik-private get svc traefik-private \
+  -o jsonpath='{range .spec.ports[*]}{.name}={.targetPort} nodePort={.nodePort}{"\n"}{end}'
+```
+
+  Expected output: `web=web nodePort=32080` / `websecure=websecure nodePort=32443`.
+  The tell-tale of a Lens edit is rewritten port names (`http`/`https` instead of
+  `web`/`websecure`) plus the annotation `k8slens-edit-resource-version`, and
+  `managedFields` showing a manager other than `helm` touching the ports later
+  than the Helm release time.
+
+  To prove it from the node, read the DNAT rule kube-proxy actually programmed:
+
+```bash
+kubectl -n kube-system exec <KUBE-PROXY_POD_ON_NODE> -c kube-proxy -- \
+  sh -c 'iptables-save -t nat | grep -E "comment .*traefik.*DNAT"'
+```
+
+  (The rule comment embeds the Service's port *name*, so grep the DNAT lines
+  rather than a named chain.)
+
+  Expected output: one line per pod, `DNAT --to-destination <POD_IP>:8000`. A
+  `:80` there is the bug. On a healthy Service the comments read
+  `traefik-private/traefik-private:web`; `:http`/`:https` comments mean someone
+  renamed the ports too. Fix by re-deploying from `values.yaml`, never by
+  re-editing the Service:
+
+```bash
+helm upgrade -i traefik-private traefik/traefik -n traefik-private --version 41.4.0 -f values.yaml
+```
+
+  **A `kubectl patch` or in-place edit of this Service works for one incident and
+  guarantees the next; only the Helm release is authoritative.**
+
+- **Time-out (no refusal) on `3xxxx` for some node IPs, refusal for others** —
+  the datacenter firewall, not Kubernetes. Refusal means the packet reached
+  kube-proxy and nothing was listening; silence means it was dropped on the way.
+  On clusters where only worker nodes are opened for service ports, target the
+  workers and treat control-plane `3xxxx` time-outs as expected. Compare per node:
+
+```bash
+for ip in <WORKER_IPS> <CONTROL_PLANE_IPS>; do
+  printf "%-14s " "$ip"; timeout 4 bash -c "cat < /dev/null > /dev/tcp/$ip/32080" \
+    2>/dev/null && echo OPEN || echo closed; done
+```
+
+- **`/dashboard/` and `/api/overview` return Traefik's own 404** — expected with
+  these values; see [Verify](#verify). `--api.dashboard=true` alone binds the API
+  to nothing.
+- **Connection refused and `targetPort` is already correct** — a `nodePort`
+  collision or the node firewall. Endpoints first, then the port owner:
 
 ```bash
 kubectl -n traefik-private get endpoints traefik-private   # expect 3 pod IPs
