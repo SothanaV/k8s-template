@@ -1,0 +1,26 @@
+{{- if .Values.initScripts }}
+{{- /*
+Scripts the docker-library entrypoint runs from /docker-entrypoint-initdb.d, which it
+does ONLY while the data volume is empty. Editing this ConfigMap after the first boot
+changes nothing on a live cluster until the PVC is wiped.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "postgresql.fullname" . }}-initdb
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgresql.labels" . | nindent 4 }}
+  {{- with (include "postgresql.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+data:
+  {{- range $name, $script := .Values.initScripts }}
+  {{- if contains "/" $name }}
+  {{- fail (printf "initScripts keys must be plain file names, got %q (they become /docker-entrypoint-initdb.d/<key>)" $name) }}
+  {{- end }}
+  {{ $name | quote }}: |
+    {{- toString $script | nindent 4 }}
+  {{- end }}
+{{- end }}

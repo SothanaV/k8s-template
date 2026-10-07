@@ -1,0 +1,94 @@
+{{- if .Values.tests.enabled }}
+{{- $fullName := include "postgresql.fullname" . }}
+{{- $image := include "postgresql.image" . }}
+{{- $secret := required "auth.existingSecret is required (README: Credentials)" .Values.auth.existingSecret }}
+{{- $host := printf "%s.%s.svc" $fullName .Release.Namespace }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $fullName }}-test
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgresql.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  restartPolicy: Never
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if .Values.podSecurityContext.enabled }}
+  securityContext:
+    {{- toYaml (omit .Values.podSecurityContext "enabled") | nindent 4 }}
+  {{- end }}
+  containers:
+    # -- Connects over TCP to the Service DNS name. There is deliberately no
+    # unix-socket variant here: $PGDATA's socket directory lives in the database pod's
+    # filesystem, and a test pod cannot reach it. going through the Service means a
+    # Service or selector mistake fails this test instead of passing silently
+    - name: test
+      image: {{ $image | quote }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command:
+        - /bin/sh
+        - -ec
+        - |
+          host="{{ $host }}"
+          attempt=0
+          # -- `helm test` can be run before the pod is Ready (and right after an
+          # upgrade), so wait rather than fail on the first refused connection
+          until psql --host "$host" --port {{ .Values.service.port }} \
+                      --username "$POSTGRES_USER" --no-psqlrc --quiet \
+                      --command 'select 1;' >/dev/null 2>&1; do
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge 30 ]; then
+              echo "still unreachable after 30 attempts: $host:{{ .Values.service.port }}" >&2
+              exit 1
+            fi
+            echo "waiting for $host:{{ .Values.service.port }}"
+            sleep 5
+          done
+          echo "connected to $host:{{ .Values.service.port }}"
+
+          # -- A write/read round-trip, not just version()
+          psql --host "$host" --port {{ .Values.service.port }} \
+               --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --quiet \
+               --set ON_ERROR_STOP=1 <<'SQL'
+          select version();
+          create table if not exists helm_smoke_test (n integer);
+          insert into helm_smoke_test values (1);
+          select count(*) > 0 as wrote_rows from helm_smoke_test;
+          drop table helm_smoke_test;
+          SQL
+          {{- if .Values.tests.hstore }}
+
+          # -- contrib is installed in the image (`make -C contrib install`, 60 extension
+          # control files) but nothing is enabled by default. hstore is `trusted = true`
+          # in its control file, so a database owner can create it: succeeding here
+          # proves the credential reaches the server over the Service and that the role
+          # owns auth.database — not that it is a superuser
+          psql --host "$host" --port {{ .Values.service.port }} \
+               --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --no-psqlrc --quiet \
+               --set ON_ERROR_STOP=1 <<'SQL'
+          create extension if not exists hstore;
+          select 'a=>1'::hstore -> 'a';
+          SQL
+          {{- end }}
+      env:
+        - name: POSTGRES_DB
+          value: {{ .Values.auth.database | quote }}
+        - name: POSTGRES_USER
+          value: {{ .Values.auth.username | quote }}
+        # -- Same Secret the server reads from, so this covers the credential path too
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $secret }}
+              key: {{ .Values.auth.secretKey }}
+      {{- if .Values.containerSecurityContext.enabled }}
+      securityContext:
+        {{- toYaml (omit .Values.containerSecurityContext "enabled") | nindent 8 }}
+      {{- end }}
+{{- end }}

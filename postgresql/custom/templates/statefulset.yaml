@@ -1,0 +1,231 @@
+{{- $_ := include "postgresql.validate" . }}
+{{- $secretName := required "auth.existingSecret is required (README: Credentials)" .Values.auth.existingSecret }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "postgresql.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgresql.labels" . | nindent 4 }}
+  {{- with (include "postgresql.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  # -- One replica: PostgreSQL is single-writer. A second pod sharing this PVC would
+  # open the same data directory and corrupt it
+  replicas: 1
+  serviceName: {{ include "postgresql.serviceName" . }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  {{- /*
+  Both fields are set explicitly instead of relying on the cluster default: the
+  StatefulSetAutoDeletePVC default changed while the feature graduated, and
+  `whenDeleted` decides whether `helm uninstall` takes the data with it.
+  */}}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: {{ eq (.Values.persistence.reclaimPolicy | default "Retain") "Delete" | ternary "Delete" "Retain" }}
+    # -- Never on scale-down: 1 -> 0 -> 1 must come back to the same cluster
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      {{- include "postgresql.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "postgresql.labels" . | nindent 8 }}
+      {{- /*
+      podAnnotations last so an operator override always wins. `initScripts` gets no
+      checksum annotation on purpose: those scripts only run on an empty volume, so
+      restarting the pod after editing them changes nothing.
+      */}}
+      {{- with (include "postgresql.annotations" (list .Values.commonAnnotations .Values.podAnnotations)) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # -- The database needs no API access, and no ServiceAccount is created: the
+      # default one stays unmounted via automountServiceAccountToken below
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext:
+        {{- toYaml (omit .Values.podSecurityContext "enabled") | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: postgresql
+          image: {{ include "postgresql.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with (include "postgresql.serverArgs" .) }}
+          args:
+            {{- . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            # -- Only the _FILE form is set: the image entrypoint exits when both
+            # POSTGRES_PASSWORD and POSTGRES_PASSWORD_FILE are present
+            - name: POSTGRES_PASSWORD_FILE
+              value: {{ include "postgresql.passwordFile" . | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.auth.username | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.auth.database | quote }}
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: {{ .Values.auth.hostAuthMethod | quote }}
+            {{- /*
+            Repeated although the image already sets it: the exec probes below and any
+            `kubectl exec ... psql` or backup command have to resolve this cluster, and
+            the value is version-specific (see the pgMajor guard in _helpers.tpl).
+            */}}
+            - name: PGDATA
+              value: {{ include "postgresql.pgData" . | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.extraEnvVars }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                {{- /*
+                TCP loopback, NOT the unix socket, and this is the load-bearing detail:
+                while the volume is empty the entrypoint starts a temp server with
+                `listen_addresses=''` to create the role and database, and that server
+                answers on the socket only. A socket probe would report Ready halfway
+                through first-time initialisation; a TCP probe stays red until the real
+                postmaster binds port 5432, which is after POSTGRES_DB exists and every
+                /docker-entrypoint-initdb.d script has finished.
+                */}}
+                - exec pg_isready --host 127.0.0.1 --port 5432 --username "$POSTGRES_USER" --quiet
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+          {{- end }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                {{- /*
+                --dbname makes Ready mean "the initial database answers", not merely that
+                a postmaster is up. No password is supplied; pg_isready treats an
+                authentication complaint as "accepting connections", which is what a
+                readiness check wants here.
+                */}}
+                - exec pg_isready --host 127.0.0.1 --port 5432 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --quiet
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready --host 127.0.0.1 --port 5432 --username "$POSTGRES_USER" --quiet
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.containerSecurityContext.enabled }}
+          securityContext:
+            {{- toYaml (omit .Values.containerSecurityContext "enabled") | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # -- One mount at the root of the cluster data, which is what PG 18 expects.
+            # Mounting the volume at /var/lib/postgresql/data — the pre-18 layout — makes
+            # the image abort with its "old databases" error
+            - name: {{ .Values.persistence.name }}
+              mountPath: {{ include "postgresql.pgDataRoot" . }}
+            - name: credentials
+              mountPath: {{ .Values.auth.secretMountPath }}
+              readOnly: true
+            {{- if .Values.initScripts }}
+            - name: initdb-scripts
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: credentials
+          secret:
+            secretName: {{ $secretName }}
+            {{- /*
+            0440, and it depends on podSecurityContext.fsGroup: kubelet writes Secret
+            volume files as root-owned and applies fsGroup as the group, so uid 70 reads
+            the password through the group bit. Verified against the image: 0400 is
+            denied to uid 70 even at mode 0400 root:70, and 0444 would make system-wide
+            readable. If you disable podSecurityContext, this file becomes unreadable and
+            initdb dies with "No such file or directory" on the password path.
+            */}}
+            defaultMode: 0440
+            # -- Projected as a single named file so the mounted directory holds only
+            # the credential the entrypoint reads
+            items:
+              - key: {{ .Values.auth.secretKey }}
+                path: {{ .Values.auth.secretKey }}
+        {{- if .Values.initScripts }}
+        - name: initdb-scripts
+          configMap:
+            name: {{ include "postgresql.fullname" . }}-initdb
+            # -- The entrypoint executes executable .sh files and sources the rest
+            defaultMode: 0555
+        {{- end }}
+        {{- if not .Values.persistence.enabled }}
+        # -- persistence disabled: data dies with the pod
+        - name: {{ .Values.persistence.name }}
+          emptyDir: {}
+        {{- else if .Values.persistence.existingClaim }}
+        - name: {{ .Values.persistence.name }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ .Values.persistence.name }}
+        labels:
+          {{- include "postgresql.selectorLabels" . | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          - {{ .Values.persistence.accessMode }}
+        {{- /* Omitted when empty so the cluster default StorageClass applies */}}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.persistence.selector }}
+        selector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
+  {{- end }}

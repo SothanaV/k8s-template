@@ -1,0 +1,200 @@
+# Values for the self-contained PostgreSQL 18 (alpine) chart in this directory.
+# Image: docker.io/library/postgres:18-alpine (https://hub.docker.com/_/postgres)
+#
+# Two placeholders, both rejected at render time until you set them. Keep real values
+# in values.local.yaml (matches the repo gitignore, never committed):
+#   <STORAGE_CLASS>  e.g. hpe-rwo or longhorn; "" uses the cluster default
+#   <NAMESPACE>      appears in README commands only, never in this file
+
+# -- Chart name used in object names. Empty = `postgresql` from Chart.yaml
+nameOverride: ""
+# -- Overrides the `<release>-<chart>` prefix. Pinned so the Service host is stable
+# (`postgresql.<namespace>.svc`) whatever the release name is
+fullnameOverride: "postgresql"
+
+# -- Labels merged into every rendered object
+commonLabels: {}
+# -- Annotations merged into every rendered object
+commonAnnotations: {}
+
+image:
+  # -- Registry. Point at an internal mirror if nodes cannot reach Docker Hub
+  registry: docker.io
+  # -- Official image (library/postgres — no organisation prefix on Docker Hub)
+  repository: postgres
+  # -- Image tag; keep equal to `appVersion` in Chart.yaml. `18-alpine` is currently
+  # PostgreSQL 18.6 — pin something dated like `18-alpine3.23` for reproducible rollouts
+  tag: "18-alpine"
+  # -- Optional `sha256:` digest. When set it replaces the tag in the image reference
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# -- ImagePullSecrets names, only needed for a private mirror, e.g. `[harborSecret]`
+imagePullSecrets: []
+
+# -- PostgreSQL major version, used to build `$PGDATA`
+# (`/var/lib/postgresql/<pgMajor>/docker`). PG 18+ moved the cluster into a
+# version-specific subdirectory, so this MUST match the major in `image.tag`;
+# _helpers.tpl fails the render when the two disagree
+pgMajor: "18"
+
+# -- Seconds between SIGINT (PostgreSQL "fast shutdown", the image's STOPSIGNAL) and
+# SIGKILL. Give clean shutdown room: WAL flush and checkpoint work scale with load
+terminationGracePeriodSeconds: 60
+
+service:
+  # -- `ClusterIP` for in-cluster clients. `NodePort`/`LoadBalancer` only when a
+  # client genuinely sits outside the cluster
+  type: ClusterIP
+  # -- Service-side port. The container itself always listens on 5432
+  port: 5432
+  # -- Fixed port when `type: NodePort` (default kubelet range 30000-32767)
+  nodePort: null
+  annotations: {}
+
+# -- Headless Service giving the StatefulSet stable per-pod DNS
+# (`postgresql-0.postgresql-headless.<namespace>.svc`)
+headlessService:
+  enabled: true
+
+auth:
+  # -- Bootstrap superuser (rendered as `POSTGRES_USER`)
+  username: postgres
+  # -- Database created on first boot (rendered as `POSTGRES_DB`)
+  database: postgres
+
+  # -- Secret holding the superuser password. The container reads it through a mounted
+  # file (`POSTGRES_PASSWORD_FILE`), so no credential ever appears in the Pod spec or
+  # in a rendered manifest. The chart does NOT create it:
+  #
+  #   kubectl -n <NAMESPACE> create secret generic postgresql-secret \
+  #     --from-literal=postgres-password="<POSTGRES_SUPERUSER_PASSWORD>"
+  existingSecret: postgresql-secret
+  # -- Key inside that Secret holding the password
+  secretKey: postgres-password
+  # -- Directory the Secret is mounted into. Its only file is
+  # `<secretKey>`, and that full path becomes `POSTGRES_PASSWORD_FILE`
+  secretMountPath: /etc/postgresql/credentials
+
+  # -- Auth method the entrypoint writes as `host all all all <method>` into
+  # pg_hba.conf, on first init only. `scram-sha-256` is the PostgreSQL 18 default;
+  # `trust` means no password at all and is dev-only
+  hostAuthMethod: scram-sha-256
+
+persistence:
+  # -- false gives an ephemeral instance: all data dies with the pod. Dev only
+  enabled: true
+  # -- Volume and claim-template name
+  name: pgdata
+  # -- "" uses the cluster default StorageClass. A placeholder value fails the render
+  storageClass: "csi-s3"
+  # -- Keep ReadWriteOnce: PostgreSQL is single-writer; a second pod sharing the
+  # volume would open the same cluster and corrupt it
+  accessMode: ReadWriteOnce
+  size: 8Gi
+  # -- Bind an existing PVC (its name) instead of provisioning one. Either path needs
+  # the volume to be EMPTY on first install, or the cluster must already be PG 18
+  existingClaim: ""
+  # -- `Retain` (via the StatefulSet's persistentVolumeClaimRetentionPolicy) keeps the
+  # volume through `helm uninstall`; `Delete` removes it with the StatefulSet
+  reclaimPolicy: Retain
+  # -- Match labels of a pre-provisioned PV
+  selector: {}
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# -- Probes run `pg_isready` inside the container against the local unix socket.
+# The startup probe covers `initdb` on a cold volume so readiness cannot fail the pod
+# mid-initialisation: worst case is failureThreshold x periodSeconds (60 x 5 = 300s)
+probes:
+  startup:
+    enabled: true
+    periodSeconds: 5
+    failureThreshold: 60
+    timeoutSeconds: 5
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+  liveness:
+    # -- Keep the liveness window generous. Crash recovery after an unclean shutdown
+    # can outlast a tight probe, and then kubelet restarts a pod that was recovering
+    initialDelaySeconds: 30
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 6
+
+# -- Server settings, rendered as `postgres -c <key>=<value>` container arguments.
+# Arguments instead of a mounted file on purpose: the image entrypoint only writes
+# inside `$PGDATA` while it is empty, so a bind-mounted `postgresql.conf` would need a
+# `config_file` indirection into a writable directory — and arguments also override
+# whatever an earlier release left behind in `postgresql.auto.conf`
+postgresqlConfig:
+  listen_addresses: "*"
+  max_connections: "100"
+  shared_buffers: "128MB"
+  work_mem: "4MB"
+  # -- PG 18 renamed `wal_keep_segments` to `wal_keep_size`
+  wal_keep_size: "64MB"
+  timezone: UTC
+
+# -- Scripts the image entrypoint runs from /docker-entrypoint-initdb.d on an EMPTY
+# data volume ONLY (`.sql`, `.sql.gz`, `.sql.xz`, `.sql.zst`, or `.sh` which is run if
+# executable and sourced otherwise). Editing this after the first boot changes nothing
+# on a populated PVC — see README "Init scripts"
+initScripts: {}
+#   00-schema.sql: |
+#     CREATE SCHEMA IF NOT EXISTS app;
+
+# -- Extra plain `env` entries for the postgres container. Keep secrets out: use
+# `valueFrom.secretKeyRef` in `extraEnvVars` for anything sensitive
+extraEnv: []
+extraEnvVars: []
+# -- Extra `postgres` arguments appended after the `-c <key>=<value>` list,
+# e.g. `[--log_statement=all]`
+args: []
+
+# -- UID/GID 70 is the `postgres` user in the alpine image:
+# https://github.com/docker-library/postgres/blob/master/18/alpine3.23/Dockerfile
+podSecurityContext:
+  enabled: true
+  # -- fsGroup makes a freshly provisioned volume group-writable, which Longhorn and
+  # local-path need; it also makes the root-owned mounted Secret file group-readable
+  fsGroup: 70
+  runAsUser: 70
+  runAsGroup: 70
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  enabled: true
+  allowPrivilegeEscalation: false
+  # -- Drop ALL with nothing added back: the container starts as uid 70, so the
+  # entrypoint's root -> postgres `gosu` step-down is never taken. Starting as root
+  # would require CAP_SETUID/CAP_SETGID here
+  capabilities:
+    drop:
+      - ALL
+  # -- false: the entrypoint writes $PGDATA, /var/run/postgresql, and /tmp
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+tests:
+  # -- Renders the Helm test pod (`helm test <release> -n <namespace>`)
+  enabled: true
+  # -- `create extension hstore` in the test: proves contrib extensions are installed
+  # in the image and that the mounted credential is a superuser
+  hstore: true

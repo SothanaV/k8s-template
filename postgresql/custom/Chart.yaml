@@ -1,0 +1,19 @@
+apiVersion: v2
+name: postgresql
+description: Single-instance PostgreSQL 18 on Alpine Linux (docker.io/library/postgres:18-alpine) — StatefulSet, Service, PVC, backups
+type: application
+# Version of this Chart.yaml, not of PostgreSQL. Bump on every chart edit so
+# `helm history <release>` and `--set image.*` overrides stay traceable.
+version: 0.1.0
+# Must equal the image tag in values.yaml (image.tag) — see README "Versioning".
+appVersion: "18-alpine"
+keywords:
+  - postgresql
+  - postgres
+  - database
+  - alpine
+home: https://hub.docker.com/_/postgres
+sources:
+  - https://github.com/docker-library/postgres
+maintainers:
+  - name: sothana

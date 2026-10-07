@@ -1,0 +1,53 @@
+{{- $fullName := include "postgresql.fullname" . -}}
+{{- $port := .Values.service.port -}}
+{{- $secret := .Values.auth.existingSecret -}}
+PostgreSQL {{ .Values.image.tag | default .Chart.AppVersion }} (alpine) — release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+1. Wait for the pod to be Ready (one replica, single-writer):
+
+   kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ $fullName }} --timeout=5m
+
+   A cold volume runs initdb first; watch it with:
+
+   kubectl -n {{ .Release.Namespace }} logs {{ $fullName }}-0 -f
+
+2. Connect from inside the cluster — host {{ $fullName }}.{{ .Release.Namespace }}.svc,
+   port {{ $port }}, user {{ .Values.auth.username }}, database {{ .Values.auth.database }}:
+
+   kubectl -n {{ .Release.Namespace }} run psql --rm -it --restart=Never \
+     --image={{ include "postgresql.image" . }} -- \
+     psql --host {{ $fullName }}.{{ .Release.Namespace }}.svc --port {{ $port }} \
+          --username {{ .Values.auth.username }} --dbname {{ .Values.auth.database }}
+
+   The password is under key {{ .Values.auth.secretKey }} of Secret {{ $secret }}, which this
+   chart never rendered into a manifest. Read it with:
+
+   kubectl -n {{ .Release.Namespace }} get secret {{ $secret }} \
+     -o jsonpath='{.data.{{ .Values.auth.secretKey }}}' | base64 -d
+
+3. Confirm the cluster sits on the version-specific PG 18 path:
+
+   kubectl -n {{ .Release.Namespace }} exec {{ $fullName }}-0 -- sh -c 'echo "$PGDATA"; ls "$PGDATA" | head'
+   # expect {{ include "postgresql.pgData" . }} with PG_VERSION, base/, global/, pg_wal/
+
+   {{- if .Values.persistence.enabled }}
+Data: one volume at {{ include "postgresql.pgDataRoot" . }} ({{ .Values.persistence.accessMode }}, {{ .Values.persistence.size }}{{ if .Values.persistence.existingClaim }}, existing PVC {{ .Values.persistence.existingClaim }}{{ else }}{{ with .Values.persistence.storageClass }}, StorageClass {{ . }}{{ else }}, cluster default StorageClass{{ end }}, PVC {{ .Values.persistence.name }}-{{ $fullName }}-0{{ end }}).
+Uninstall reclaim behaviour: {{ .Values.persistence.reclaimPolicy }}.
+   {{- else }}
+
+   WARNING: persistence.enabled is false — this instance loses everything when the pod stops.
+   {{- end }}
+
+Verify next:
+
+   helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+{{- if not .Values.tests.enabled }}
+
+   (tests are disabled — set tests.enabled=true to render the test pod)
+{{- end }}
+Uninstall — with the default Retain policy the PVC and its data survive:
+
+   helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+README.md in this directory covers upgrades, password rotation, and the PG 18
+"old databases" error that follows a major-version bump.

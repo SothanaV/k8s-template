@@ -1,0 +1,26 @@
+{{- if .Values.headlessService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "postgresql.headlessName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "postgresql.labels" . | nindent 4 }}
+  {{- with (include "postgresql.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  # -- Headless: DNS returns the pod IP directly
+  clusterIP: None
+  # -- Keeps DNS answering while the pod is not Ready, so a restarting database is
+  # still resolvable to clients holding connections
+  publishNotReadyAddresses: true
+  ports:
+    - name: postgres
+      port: {{ .Values.service.port }}
+      targetPort: postgres
+      protocol: TCP
+  selector:
+    {{- include "postgresql.selectorLabels" . | nindent 4 }}
+{{- end }}
