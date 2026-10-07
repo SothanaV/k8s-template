@@ -1,0 +1,24 @@
+deployment:
+  replicas: 3
+ingressClass:
+  enabled: true
+  isDefaultClass: false
+  name: traefik-private
+ports:
+  web:
+    nodePort: 32080
+  websecure:
+    nodePort: 32443
+providers:
+  kubernetesIngress:
+    enabled: false
+  kubernetesIngressNGINX:
+    enabled: true
+    ingressClass: traefik-private
+    ingressClassByName: true
+    publishService:
+      enabled: false
+    watchIngressWithoutClass: false
+service:
+  spec:
+    type: NodePort
