@@ -19,6 +19,7 @@ Helm chart templates and custom values for self-hosted Kubernetes services.
 | [GitLab](gitlab/README.md) | Self-hosted DevOps platform | `gitlab` |
 | [GitLab Runner](gitlab-runner/README.md) | CI/CD runner for GitLab | `gitlab-runner` |
 | [InfluxDB](influx/README.md) | Time-series database (nginx sidecar for subpath) | `influx` |
+| [InfluxDB Cluster](influx-cluster/README.md) | Sharded InfluxDB (meta + data, auto-join chart) | *(per release)* |
 | [kube-prometheus-stack](prometheus-stack/README.md) | Cluster monitoring and alerting | `monitoring` |
 | [n8n](n8n/README.md) | Workflow automation | `n8n` |
 | [Open WebUI](open-webui/README.md) | Web UI for LLMs | `open-webui` |
