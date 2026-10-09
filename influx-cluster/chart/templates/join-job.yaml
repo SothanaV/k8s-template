@@ -1,0 +1,139 @@
+{{/* Address lists the Job registers, plus the join script. Rendered as a helm hook resource so a `helm upgrade` that only changes replica counts re-runs the registration. */}}
+{{- if .Values.cluster.joiner.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "influxdb-cluster.jobName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "join") | nindent 4 }}
+  annotations:
+    # Same hook annotations as the Job, so Helm creates and deletes the pair together
+    helm.sh/hook: {{ join "," .Values.cluster.joiner.hooks }}
+    helm.sh/hook-delete-policy: {{ join "," .Values.cluster.joiner.hookDeletePolicy }}
+data:
+  join.sh: |
+    {{- .Files.Get "files/join.sh" | nindent 4 }}
+  meta-addrs: |
+    {{- include "influxdb-cluster.metaAddrs" . | nindent 4 }}
+  data-addrs: |
+    {{- include "influxdb-cluster.dataAddrs" . | nindent 4 }}
+  databases: |
+    {{- include "influxdb-cluster.databaseList" . | nindent 4 }}
+{{- end }}
+---
+{{/*
+Forms the cluster. Without this the install is six pods that never talk: 3 meta nodes,
+none of which has bootstrapped a raft group, and 2 data nodes that print "meta service
+unavailable" forever. Upstream expects a human to run `influxd-ctl add-meta`/`add-data`
+after every install; this Job runs those same commands, and skips addresses that are
+already members so it is safe to re-run on upgrade (scale-out included).
+*/}}
+{{- if .Values.cluster.joiner.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "influxdb-cluster.jobName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "join") | nindent 4 }}
+  annotations:
+    helm.sh/hook: {{ join "," .Values.cluster.joiner.hooks }}
+    helm.sh/hook-delete-policy: {{ join "," .Values.cluster.joiner.hookDeletePolicy }}
+    {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations)) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+spec:
+  backoffLimit: {{ int .Values.cluster.joiner.backoffLimit }}
+  activeDeadlineSeconds: {{ int .Values.cluster.joiner.activeDeadlineSeconds }}
+  {{- with .Values.cluster.joiner.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ int . }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "influxdb-cluster.componentLabels" (list . "join") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "influxdb-cluster.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (include "influxdb-cluster.podSecurityContext" .Values.cluster.joiner.podSecurityContext) }}
+      securityContext:
+        {{- . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: join
+          image: {{ include "influxdb-cluster.joinerImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -e
+            - /config/join.sh
+          {{- with (include "influxdb-cluster.containerSecurityContext" .Values.cluster.joiner.containerSecurityContext) }}
+          securityContext:
+            {{- . | nindent 12 }}
+          {{- end }}
+          env:
+            # The meta node whose API this Job drives. Ordinal 0: serveJoin bootstraps the
+            # raft group from the node named by -bind, so it must be a pod of this release
+            - name: JOIN_ENTRY
+              value: {{ include "influxdb-cluster.metaPodAddr" (list . 0) | quote }}
+            - name: DATA_HOST
+              value: {{ printf "%s.%s" (include "influxdb-cluster.dataName" .) (include "influxdb-cluster.suffix" .) | quote }}
+            - name: DATA_HTTP_PORT
+              value: {{ int .Values.ports.dataHTTP | quote }}
+            - name: AUTH_INFLUX
+              value: {{ ternary "on" "off" .Values.cluster.auth.http | quote }}
+            - name: CREATE_ADMIN_USER
+              value: {{ ternary "on" "off" .Values.cluster.adminUser.enabled | quote }}
+            - name: ADMIN_ALL_PRIVILEGES
+              value: {{ ternary "true" "false" .Values.cluster.adminUser.admin | quote }}
+            - name: CREATE_DATABASES
+              value: {{ ternary "on" "off" .Values.cluster.joiner.createDatabases | quote }}
+            - name: JOIN_ONLY
+              value: {{ ternary "on" "off" .Values.cluster.joiner.joinOnly | quote }}
+            - name: WAIT_PORT_TIMEOUT
+              value: {{ int .Values.cluster.waitFor.portTimeoutSeconds | quote }}
+            - name: WAIT_LEADER_TIMEOUT
+              value: {{ int .Values.cluster.waitFor.leaderTimeoutSeconds | quote }}
+            - name: WAIT_DATA_TIMEOUT
+              value: {{ int .Values.cluster.waitFor.dataJoinTimeoutSeconds | quote }}
+            {{- include "influxdb-cluster.joinerEnv" . | nindent 12 }}
+          {{- with .Values.cluster.joiner.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          projected:
+            sources:
+              - configMap:
+                  name: {{ include "influxdb-cluster.jobName" . }}
+                  items:
+                    - key: join.sh
+                      path: join.sh
+                      mode: 0755
+                    - key: meta-addrs
+                      path: meta-addrs
+                    - key: data-addrs
+                      path: data-addrs
+                    - key: databases
+                      path: databases
+      {{- with .Values.cluster.joiner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cluster.joiner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cluster.joiner.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

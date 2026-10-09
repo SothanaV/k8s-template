@@ -1,0 +1,31 @@
+{{/*
+Admin entry point for the meta HTTP API (`influxd-ctl -bind <this>:8091`). Optional in
+operation — the headless Service resolves the same pods — but a single stable name is what
+admins and `influxd-ctl` scripts want. Requests that must reach the leader are redirected
+to it by the meta nodes themselves, so round-robin here is harmless.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "influxdb-cluster.metaName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "meta") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations .Values.meta.service.annotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.meta.service.type }}
+  {{- if and (eq .Values.meta.service.type "ClusterIP") .Values.meta.service.clusterIP }}
+  clusterIP: {{ .Values.meta.service.clusterIP | quote }}
+  {{- end }}
+  ports:
+    - name: meta-api
+      port: {{ int .Values.ports.metaAPI }}
+      targetPort: meta-api
+      protocol: TCP
+    {{- with .Values.meta.service.extraPorts }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  selector:
+    {{- include "influxdb-cluster.componentSelectorLabels" (list . "meta") | nindent 4 }}

@@ -1,0 +1,81 @@
+{{/*
+Data node config. One file serves every replica: `hostname` and the secrets arrive as
+INFLUXDB_* environment variables (influxdb does not expand ${VAR} inside TOML, and the
+hostname differs per pod).
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "influxdb-cluster.dataConfigName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "data") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+data:
+  influxdb.conf: |
+    # Per-pod identity arrives as INFLUXDB_HOSTNAME; the top-level bind-address is the
+    # data node's cluster-internal TCP address registered by `influxd-ctl add-data`.
+    reporting-disabled = {{ include "influxdb-cluster.tomlValue" .Values.telemetry.disableReporting }}
+    bind-address = ":{{ int .Values.ports.dataTCP }}"
+    gossip-frequency = {{ .Values.data.gossipFrequency | quote }}
+
+    [meta]
+      # The data node keeps its meta-client state (`client.json`) here — the list of meta
+      # nodes it talks to, learned on the first `add-data`. Losing it means the node comes
+      # back unable to find the cluster, so persistence for data nodes is not optional.
+      dir = {{ printf "%s/meta" (trimSuffix "/" .Values.data.persistence.mountPath) | quote }}
+
+    [data]
+      dir = {{ printf "%s/data" (trimSuffix "/" .Values.data.persistence.mountPath) | quote }}
+      engine = "tsm1"
+      wal-dir = {{ printf "%s/wal" (trimSuffix "/" .Values.data.persistence.mountPath) | quote }}
+      {{- with .Values.data.tsdb }}
+      {{- include "influxdb-cluster.tomlLines" . | nindent 2 }}
+      {{- end }}
+
+    [http]
+      enabled = {{ include "influxdb-cluster.tomlValue" .Values.data.http.enabled }}
+      bind-address = ":{{ int .Values.ports.dataHTTP }}"
+      realm = {{ .Values.data.http.realm | quote }}
+      {{- if gt (int .Values.data.http.maxBodySize) 0 }}
+      max-body-size = {{ int .Values.data.http.maxBodySize }}
+      {{- end }}
+      flux-enabled = {{ include "influxdb-cluster.tomlValue" .Values.data.http.flux.enabled }}
+      {{- with .Values.data.http.config }}
+      {{- include "influxdb-cluster.tomlLines" . | nindent 2 }}
+      {{- end }}
+
+    [hinted-handoff]
+      enabled = true
+      dir = {{ printf "%s/hh" (trimSuffix "/" .Values.data.persistence.mountPath) | quote }}
+      {{- with .Values.data.hintedHandoff }}
+      {{- include "influxdb-cluster.tomlLines" . | nindent 2 }}
+      {{- end }}
+
+    [coordinator]
+      {{- with .Values.data.coordinator }}
+      {{- include "influxdb-cluster.tomlLines" . | nindent 2 }}
+      {{- end }}
+    {{- range $input, $decl := .Values.data.inputs }}
+    {{- if $decl.enabled }}
+
+    [[{{ $input }}]]
+      enabled = true
+      bind-address = "0.0.0.0:{{ int $decl.port }}"
+      {{- include "influxdb-cluster.tomlLines" $decl.config | nindent 2 }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.data.config }}
+    {{- range $section, $entries := . }}
+
+    [{{ $section }}]
+      {{- include "influxdb-cluster.tomlLines" $entries | nindent 6 }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.data.rawExtra }}
+
+    # data.rawExtra, appended verbatim
+    {{- . | nindent 4 }}
+    {{- end }}

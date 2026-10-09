@@ -1,0 +1,61 @@
+{{/*
+Governing Services. A StatefulSet's `serviceName` only gives pods stable DNS if the
+Service is headless (clusterIP: None); the records are the per-pod A records the nodes
+advertise into the cluster, so these two objects are load-bearing for cluster formation,
+not decoration.
+
+publishNotReadyAddresses: true is required for the meta one. Before the raft group has a
+leader the pods are NotReady, and DNS that hides NotReady pods would make the first
+`add-meta` fail to resolve its peers — a chicken-and-egg bootstrap deadlock.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "influxdb-cluster.metaHeadlessName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "meta") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations .Values.meta.service.annotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: meta-api
+      port: {{ int .Values.ports.metaAPI }}
+      targetPort: meta-api
+      protocol: TCP
+    - name: meta-raft
+      port: {{ int .Values.ports.metaRaft }}
+      targetPort: meta-raft
+      protocol: TCP
+  selector:
+    {{- include "influxdb-cluster.componentSelectorLabels" (list . "meta") | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "influxdb-cluster.dataHeadlessName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "data") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations .Values.data.headlessService.annotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: {{ int .Values.ports.dataHTTP }}
+      targetPort: http
+      protocol: TCP
+    - name: tcp
+      port: {{ int .Values.ports.dataTCP }}
+      targetPort: tcp
+      protocol: TCP
+  selector:
+    {{- include "influxdb-cluster.componentSelectorLabels" (list . "data") | nindent 4 }}

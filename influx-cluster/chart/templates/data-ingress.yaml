@@ -1,0 +1,43 @@
+{{/*
+Exposes the data HTTP API. InfluxDB Cluster has no UI, so this is for clients: InfluxQL
+/query and /write, the /api/v2 write/query shims, and (if enabled) Flux. Any path must
+reach any data node, so one rule covering `/` is the whole requirement.
+
+Warning: with cluster.auth.http still false this publishes an UNAUTHENTICATED read/write
+database. Turn authentication on, or restrict it with a NetworkPolicy, first.
+*/}}
+{{- if .Values.data.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "influxdb-cluster.dataName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "data") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations .Values.data.ingress.annotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.data.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.data.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.data.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ default "/" .path | quote }}
+            pathType: {{ default "Prefix" .pathType }}
+            backend:
+              service:
+                name: {{ include "influxdb-cluster.dataName" $ }}
+                port:
+                  name: http
+          {{- end }}
+    {{- end }}
+{{- end }}

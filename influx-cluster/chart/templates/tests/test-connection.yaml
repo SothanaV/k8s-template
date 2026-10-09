@@ -1,0 +1,141 @@
+{{/*
+Run with `helm test <release> -n <namespace>`.
+
+The data image is the one carrying the `influx` CLI (the meta image has only influxd-meta
+and influxd-ctl), so this pod uses it. The test goes through the client Service instead of
+a pod on purpose: that is what proves the parts an application depends on — Service DNS,
+the Service selectors, and shard mapping (a write has to be routed to a node owning a shard
+for the database). It creates and drops its own database, so nothing in
+`cluster.databases` is touched.
+
+A `helm test` right after an install is safe: /ping is polled for up to 5 minutes, which
+covers a slow volume provisioner.
+*/}}
+{{- if .Values.tests.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "influxdb-cluster.fullname" . }}-test
+  labels:
+    {{- include "influxdb-cluster.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "influxdb-cluster.serviceAccountName" . }}
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 8 }}
+  {{- end }}
+  containers:
+    - name: test
+      image: {{ include "influxdb-cluster.image" (list . "data") }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command:
+        - /bin/sh
+        - -ec
+      args:
+        - |
+          host={{ printf "%q" (printf "%s.%s" (include "influxdb-cluster.dataName" .) (include "influxdb-cluster.suffix" .)) }}
+          port={{ int .Values.data.service.port }}
+          url="http://${host}:${port}"
+          db=helm_smoke_test
+          measurement=helm_smoke
+          repl={{ le (int .Values.data.replicas) 1 | ternary 1 (min 2 (int .Values.data.replicas)) }}
+
+          # POSIX sh has no arrays, and word-splitting an unquoted credential string
+          # would break on a password with a space, so credentials branch on the env var the
+          # template only sets when the data API requires them. Sending an Authorization
+          # header to an unauthenticated cluster is answered 401, so it must be conditional.
+          q() {
+            if [ -n "${ADMIN_USER:-}" ]; then
+              curl -fsS --max-time 15 -u "${ADMIN_USER}:${ADMIN_PASSWORD}" --data-urlencode "q=$1" "${url}/query"
+            else
+              curl -fsS --max-time 15 --data-urlencode "q=$1" "${url}/query"
+            fi
+          }
+          write() {
+            if [ -n "${ADMIN_USER:-}" ]; then
+              curl -fsS --max-time 15 -u "${ADMIN_USER}:${ADMIN_PASSWORD}" -d "$2" "${url}/write?db=$1"
+            else
+              curl -fsS --max-time 15 -d "$2" "${url}/write?db=$1"
+            fi
+          }
+          # `/query` needs the database from EITHER the `db` parameter or a fully qualified
+          # measurement ("db"."rp".measurement); a bare `FROM helm_smoke` with no db is
+          # answered {"error":"database name required"}
+          qdb() {
+            if [ -n "${ADMIN_USER:-}" ]; then
+              curl -fsS --max-time 15 -u "${ADMIN_USER}:${ADMIN_PASSWORD}" \
+                --data-urlencode "db=$1" --data-urlencode "q=$2" "${url}/query"
+            else
+              curl -fsS --max-time 15 \
+                --data-urlencode "db=$1" --data-urlencode "q=$2" "${url}/query"
+            fi
+          }
+
+          echo "==> /ping through the client Service"
+          # Any 2xx: a data node answers 503 until it has joined the cluster, so 200 means
+          # the Service routes to a joined node
+          i=0
+          until curl -fsS --max-time 5 "${url}/ping" >/dev/null 2>&1; do
+            i=$((i + 1))
+            [ "$i" -ge 60 ] && { echo "no joined data node answered /ping via ${url}" >&2; exit 1; }
+            echo "    waiting for a joined data node (${i}/60)"
+            sleep 5
+          done
+          echo "    /ping OK"
+
+          echo "==> SHOW SERVERS"
+          # Not `SHOW DATA NODES`: that is an influxd-ctl concept, not InfluxQL. This fork
+          # exposes the topology through `SHOW SERVERS` (data_nodes + meta_nodes series).
+          q "SHOW SERVERS" || { echo "queries are not reaching the cluster" >&2; exit 1; }
+
+          echo "==> create ${db} (replication ${repl})"
+          # No `IF NOT EXISTS`: InfluxQL rejects `IF` in CREATE DATABASE (this fork matches
+          # InfluxDB 1.x), and a repeated CREATE DATABASE is answered without an error.
+          q "CREATE DATABASE ${db} WITH REPLICATION ${repl}" >/dev/null
+
+          echo "==> write one point"
+          # nanosecond timestamp from the clock plus a random tail: two runs in the same
+          # second still get distinct points
+          ns=$(awk 'BEGIN{srand(); printf "%d%09d\n", systime(), int(rand()*1000000000)}')
+          write "${db}" "${measurement},host=test value=42i ${ns}"
+
+          echo "==> read it back"
+          # Replication 2 means the shard copy may still be propagating; 60s is generous
+          j=0
+          while :; do
+            out=$(qdb "${db}" "SELECT value FROM ${measurement} WHERE time > now() - 10m")
+            # InfluxDB's JSON returns each row as an ARRAY (values":[["<ts>",42]]), never as
+            # an object, so `"value":42` would never match. `,42]` is the row's tail.
+            printf '%s' "$out" | grep -q ',42\]' && { echo "    read back value=42"; break; }
+            j=$((j + 1))
+            [ "$j" -ge 12 ] && { echo "the point never became queryable:" >&2; printf '%s\n' "$out" >&2; exit 1; }
+            echo "    not visible yet (${j}/12)"
+            sleep 5
+          done
+
+          echo "==> drop ${db}"
+          q "DROP DATABASE ${db}" >/dev/null
+          echo "PASS"
+      {{- if .Values.cluster.auth.http }}
+      env:
+        - name: ADMIN_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.cluster.adminUser.existingSecret }}
+              key: {{ .Values.cluster.adminUser.userKey }}
+        - name: ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.cluster.adminUser.existingSecret }}
+              key: {{ .Values.cluster.adminUser.passwordKey }}
+      {{- end }}
+      {{- with .Values.tests.resources }}
+      resources:
+        {{- toYaml . | nindent 12 }}
+      {{- end }}
+{{- end }}

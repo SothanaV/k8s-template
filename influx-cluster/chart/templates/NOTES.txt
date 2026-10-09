@@ -1,0 +1,69 @@
+InfluxDB Cluster {{ .Chart.AppVersion }} is installed as release "{{ .Release.Name }}" in namespace "{{ include "influxdb-cluster.namespace" . }}".
+
+  meta nodes: {{ int .Values.meta.replicas }}   data nodes: {{ int .Values.data.replicas }}
+  image:      {{ include "influxdb-cluster.image" (list . "data") }}
+  storage:    {{ if .Values.data.persistence.enabled }}{{ .Values.data.persistence.storageClass | default "<cluster default>" }} ({{ .Values.data.persistence.size }} per data node){{ else }}EPHEMERAL — data dies with the pod{{ end }}
+
+Give the join hook a minute to form the cluster:
+
+  kubectl -n {{ include "influxdb-cluster.namespace" . }} logs job/{{ include "influxdb-cluster.fullname" . }}-join -f
+
+Expected tail of a healthy run:
+
+  [join] all data nodes are members
+  [join] created database mydb (replication 2)
+  [join] done
+
+The Job is a helm hook, so it is deleted on success. Re-run it any time (it
+skips addresses that are already members):
+
+  helm upgrade {{ .Release.Name }} . -n {{ include "influxdb-cluster.namespace" . }} -f values.local.yaml
+
+Verify after it completes:
+
+  kubectl -n {{ include "influxdb-cluster.namespace" . }} exec {{ include "influxdb-cluster.metaName" . }}-0 -- \
+    influxd-ctl -bind localhost:{{ int .Values.ports.metaAPI }} show
+
+  helm test {{ .Release.Name }} -n {{ include "influxdb-cluster.namespace" . }}
+
+WRITING AND QUERYING
+{{ if .Values.cluster.auth.http }}
+Authentication is ON. Read the admin credentials from the Secret (never from a values
+file) and pass them on every request:
+
+  kubectl -n {{ include "influxdb-cluster.namespace" . }} get secret {{ .Values.cluster.adminUser.existingSecret }} \
+    -o jsonpath='{.data.{{ .Values.cluster.adminUser.passwordKey }}}' | base64 -d
+
+  curl -u admin:<HTTP_ADMIN_PASSWORD> \
+    --data-urlencode "db=mydb" --data-urlencode "q=SHOW MEASUREMENTS" \
+    "http://{{ include "influxdb-cluster.dataName" . }}.{{ include "influxdb-cluster.namespace" . }}.svc:{{ int .Values.data.service.port }}/query"
+{{- else }}
+  curl -XPOST "http://{{ include "influxdb-cluster.dataName" . }}.{{ include "influxdb-cluster.namespace" . }}.svc:{{ int .Values.data.service.port }}/write?db=mydb" \
+    --data-binary 'cpu,host=s1 load=42i '$(date +%s%N)
+
+  curl -G "http://{{ include "influxdb-cluster.dataName" . }}.{{ include "influxdb-cluster.namespace" . }}.svc:{{ int .Values.data.service.port }}/query" \
+    --data-urlencode "db=mydb" --data-urlencode "q=SELECT * FROM cpu LIMIT 5"
+{{- end }}
+
+Any data node accepts writes for the whole cluster (unowned shards are forwarded, or
+queued in hinted handoff while the owning node is down), so this Service is the only
+endpoint applications need:
+
+  http://{{ include "influxdb-cluster.dataName" . }}.{{ include "influxdb-cluster.namespace" . }}.svc:{{ int .Values.data.service.port }}
+{{ if eq .Values.data.service.type "ClusterIP" }}
+  It is ClusterIP: reachable from inside the cluster only. From outside, port-forward it
+  or install a proxy in front — InfluxDB Cluster ships no load balancer of its own.
+{{- end }}
+{{ if not .Values.cluster.joiner.enabled }}
+WARNING: cluster.joiner.enabled is false, so NOTHING joined these nodes. Until you run
+`influxd-ctl add-meta` / `add-data` by hand (README: Manual joining), the meta nodes have
+no raft leader and the data nodes sync nothing.
+{{- end }}
+{{ if and (not .Values.cluster.auth.http) .Values.data.ingress.enabled }}
+WARNING: data.ingress.enabled is true while cluster.auth.http is false — the database is
+published to that host with no authentication.
+{{- end }}
+{{ if and (not .Values.meta.persistence.enabled) (not .Values.data.persistence.enabled) }}
+WARNING: persistence is off for both node types: the cluster's metadata plane and all
+series data are gone as soon as a pod is deleted.
+{{- end }}

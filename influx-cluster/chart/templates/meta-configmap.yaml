@@ -1,0 +1,44 @@
+{{/*
+Meta node config. Shape follows upstream docker/meta/influxdb-meta.conf, plus the identity
+and ports this chart owns.
+
+No secret and no per-pod value appears in this file, so one ConfigMap serves every
+replica:
+  - influxdb does NOT expand `${VAR}` inside its TOML (`shared-secret = "${X}"` would
+    store that literal text), so secrets arrive as INFLUXDB_META_* environment variables,
+    which toml.ApplyEnvOverrides maps onto the same config keys.
+  - `hostname` differs per pod, so it arrives as INFLUXDB_HOSTNAME (see the StatefulSet's
+    `args`), and `influxd-meta run` propagates it into [meta] RemoteHostname — the address
+    advertised into raft.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "influxdb-cluster.metaConfigName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "meta") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+data:
+  influxdb-meta.conf: |
+    reporting-disabled = {{ include "influxdb-cluster.tomlValue" .Values.telemetry.disableReporting }}
+
+    [meta]
+      dir = {{ printf "%s/meta" (trimSuffix "/" .Values.meta.persistence.mountPath) | quote }}
+      bind-address = ":{{ int .Values.ports.metaRaft }}"
+      http-bind-address = ":{{ int .Values.ports.metaAPI }}"
+      {{- with .Values.meta.raft }}
+      {{- include "influxdb-cluster.tomlLines" . | nindent 6 }}
+      {{- end }}
+
+    [logging]
+      {{- include "influxdb-cluster.tomlLines" .Values.meta.logging | nindent 6 }}
+    {{- with .Values.meta.config }}
+    {{- range $section, $entries := . }}
+
+    [{{ $section }}]
+      {{- include "influxdb-cluster.tomlLines" $entries | nindent 6 }}
+    {{- end }}
+    {{- end }}

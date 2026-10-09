@@ -1,0 +1,49 @@
+{{/*
+Disruption budgets. Two failure modes matter differently here, which is why the meta
+budget is stricter: losing a meta node past the quorum loses the cluster's metadata plane
+(no shard mapping changes, no CQ scheduling, and no way to add/remove nodes), while losing
+a data node past the replication factor loses writes until copies are rebalanced.
+*/}}
+{{- if .Values.meta.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "influxdb-cluster.metaName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "meta") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.meta.pdb.maxUnavailable }}
+  maxUnavailable: {{ int .Values.meta.pdb.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ int .Values.meta.pdb.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "influxdb-cluster.componentSelectorLabels" (list . "meta") | nindent 6 }}
+{{- end }}
+---
+{{- if .Values.data.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "influxdb-cluster.dataName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "data") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.data.pdb.maxUnavailable }}
+  maxUnavailable: {{ int .Values.data.pdb.maxUnavailable }}
+  {{- else }}
+  minAvailable: {{ int .Values.data.pdb.minAvailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "influxdb-cluster.componentSelectorLabels" (list . "data") | nindent 6 }}
+{{- end }}

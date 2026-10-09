@@ -1,0 +1,22 @@
+apiVersion: v2
+name: influxdb-cluster
+description: InfluxDB Cluster (open-source InfluxDB Enterprise alternative) — 3 meta nodes + 2 data nodes as StatefulSets, with a hook Job that runs influxd-ctl add-meta/add-data so the cluster forms itself
+type: application
+# Version of this Chart.yaml, not of InfluxDB. Bump on every chart edit so
+# `helm history <release>` stays traceable.
+version: 0.1.0
+# Must equal `image.tag` in values.yaml: the image tag rendered for a pod is
+# `<image.tag>-<meta|data>`, e.g. chengshiwen/influxdb:1.8.11-c1.2.0-meta
+appVersion: "1.8.11-c1.2.0"
+keywords:
+  - influxdb
+  - influxdb-cluster
+  - timeseries
+  - metrics
+  - clustering
+home: https://github.com/chengshiwen/influxdb-cluster
+sources:
+  - https://github.com/chengshiwen/influxdb-cluster
+  - https://hub.docker.com/r/chengshiwen/influxdb
+maintainers:
+  - name: sothana

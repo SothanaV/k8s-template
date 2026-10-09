@@ -1,0 +1,213 @@
+{{/*
+Meta nodes: the raft group holding cluster metadata (which node owns which shard,
+retention policies, users). Sized small on purpose — the store is megabytes.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "influxdb-cluster.metaName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "meta") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ int .Values.meta.replicas }}
+  # Parallel, not the default OrderedReady: raft needs the peers reachable at the same
+  # time, and OrderedReady would never even start ordinal 1 if ordinal 0's readiness
+  # waits on a leader (which needs all peers up).
+  podManagementPolicy: Parallel
+  serviceName: {{ include "influxdb-cluster.metaHeadlessName" . }}
+  selector:
+    matchLabels:
+      {{- include "influxdb-cluster.componentSelectorLabels" (list . "meta") | nindent 6 }}
+  {{- if .Values.meta.persistence.enabled }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: {{ .Values.meta.persistence.reclaimPolicy }}
+    whenScaled: {{ .Values.meta.persistence.reclaimPolicy }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "influxdb-cluster.componentLabels" (list . "meta") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/meta-configmap.yaml") . | sha256sum }}
+        {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations .Values.meta.podAnnotations)) }}
+        {{- . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "influxdb-cluster.validate" . | default "" }}
+      {{- if not .Values.meta.persistence.enabled }}
+      # intentional ephemeral state (cluster.allowEphemeral)
+      {{- end }}
+      serviceAccountName: {{ include "influxdb-cluster.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (include "influxdb-cluster.podSecurityContext" .Values.meta.podSecurityContext) }}
+      securityContext:
+        {{- . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ int .Values.meta.terminationGracePeriodSeconds }}
+      {{- with .Values.meta.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- if .Values.initContainers.chownData.enabled }}
+        - name: chown-data
+          image: {{ printf "%s/%s:%s" (trimSuffix "/" .Values.initContainers.chownData.image.registry) .Values.initContainers.chownData.image.repository .Values.initContainers.chownData.image.tag }}
+          imagePullPolicy: {{ .Values.initContainers.chownData.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # Newly provisioned volumes arrive root-owned on most drivers; with a
+              # non-root podSecurityContext the node could not write its raft store.
+              before="$(stat -c '%u:%g %a' {{ .Values.meta.persistence.mountPath | quote }} 2>/dev/null || echo missing)"
+              chown -R {{ .Values.meta.podSecurityContext.runAsUser | default 1001 }}:{{ .Values.meta.podSecurityContext.runAsGroup | default 1001 }} {{ .Values.meta.persistence.mountPath | quote }}
+              echo "chown {{ .Values.meta.persistence.mountPath }}: $before -> $(stat -c '%u:%g %a' {{ .Values.meta.persistence.mountPath | quote }})"
+          {{- with .Values.initContainers.chownData.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: {{ .Values.meta.persistence.name }}
+              mountPath: {{ .Values.meta.persistence.mountPath | quote }}
+        {{- end }}
+        {{- with .Values.meta.extraInitContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: influxd-meta
+          # `sh -c` + exec exists for one value: INFLUXDB_HOSTNAME, which must carry this
+          # pod's ordinal. Kubernetes does not expand `$VAR` inside `env[].value`, so the
+          # ordinal is appended in the shell and `exec` hands PID 1 to influxd-meta so
+          # SIGTERM still reaches it. The upstream entrypoint only rewrites the command
+          # into `-config <path>`; passing the path keeps this file self-describing.
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              : "${POD_NAME:?POD_NAME comes from the downward API}"
+              export INFLUXDB_HOSTNAME="${POD_NAME}.{{ include "influxdb-cluster.metaHeadlessName" . }}.{{ include "influxdb-cluster.suffix" . }}"
+              exec /entrypoint.sh influxd-meta -config /etc/influxdb/influxdb-meta.conf{{ if eq (int .Values.meta.replicas) 1 }} -single-server{{ end }}
+          image: {{ include "influxdb-cluster.image" (list . "meta") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with (include "influxdb-cluster.containerSecurityContext" .Values.meta.containerSecurityContext) }}
+          securityContext:
+            {{- . | nindent 12 }}
+          {{- end }}
+          env:
+            # Per-pod identity: `influxd-meta` maps INFLUXDB_HOSTNAME onto the top-level
+            # `hostname`, which becomes the address advertised into raft. The lowercase
+            # form is the FQDN of the pod, resolvable through the headless Service.
+            # Only the ordinal-carrying name: the shell in `args` builds the FQDN from it,
+            # because Kubernetes does not expand $VAR inside env[].value
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- include "influxdb-cluster.authEnv" (dict "kind" "meta" "Values" .Values) | nindent 12 }}
+            {{- with .Values.meta.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.meta.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: meta-api
+              containerPort: {{ int .Values.ports.metaAPI }}
+              protocol: TCP
+            - name: meta-raft
+              containerPort: {{ int .Values.ports.metaRaft }}
+              protocol: TCP
+          {{- if (get .Values.meta.probes "startup").enabled }}
+          startupProbe:
+            {{- include "influxdb-cluster.probe" (dict "mode" .Values.meta.probeMode.startup "port" "meta-api" "spec" (get .Values.meta.probes "startup")) | nindent 12 }}
+          {{- end }}
+          {{- with (get .Values.meta.probes "readiness") }}
+          readinessProbe:
+            {{- include "influxdb-cluster.probe" (dict "mode" $.Values.meta.probeMode.readiness "port" "meta-api" "spec" .) | nindent 12 }}
+          {{- end }}
+          {{- with (get .Values.meta.probes "liveness") }}
+          livenessProbe:
+            {{- include "influxdb-cluster.probe" (dict "mode" $.Values.meta.probeMode.liveness "port" "meta-api" "spec" .) | nindent 12 }}
+          {{- end }}
+          {{- with .Values.meta.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/influxdb
+              readOnly: true
+            - name: {{ .Values.meta.persistence.name }}
+              mountPath: {{ .Values.meta.persistence.mountPath | quote }}
+            {{- with .Values.meta.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- with .Values.meta.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "influxdb-cluster.metaConfigName" . }}
+        {{- if not .Values.meta.persistence.enabled }}
+        - name: {{ .Values.meta.persistence.name }}
+          emptyDir: {}
+        {{- else if .Values.meta.persistence.existingClaim }}
+        - name: {{ .Values.meta.persistence.name }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.meta.persistence.existingClaim }}
+        {{- end }}
+        {{- with .Values.meta.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.meta.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.meta.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.meta.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.meta.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and .Values.meta.persistence.enabled (not .Values.meta.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ .Values.meta.persistence.name }}
+        labels:
+          {{- include "influxdb-cluster.componentLabels" (list . "meta") | nindent 10 }}
+        {{- with (include "influxdb-cluster.annotations" (list .Values.meta.persistence.annotations)) }}
+        annotations:
+          {{- . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          - {{ .Values.meta.persistence.accessMode }}
+        {{- with .Values.meta.persistence.selector }}
+        selector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- /* Omitted when empty so the cluster default StorageClass applies */}}
+        {{- with .Values.meta.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.meta.persistence.size | quote }}
+  {{- end }}

@@ -1,0 +1,211 @@
+{{/*
+Data nodes: the nodes that store and serve the time-series data. Any data node accepts
+writes for the whole cluster (it forwards or hinted-hands-off what it does not own), so
+the client Service is a plain load-balanced front end over these pods.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "influxdb-cluster.dataName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "data") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ int .Values.data.replicas }}
+  # Parallel: a data node whose meta cluster has not formed yet sits in "meta service
+  # unavailable" retries, and the join Job is what actually registers it. Serial startup
+  # would only make slow-volume first installs slower.
+  podManagementPolicy: Parallel
+  serviceName: {{ include "influxdb-cluster.dataHeadlessName" . }}
+  selector:
+    matchLabels:
+      {{- include "influxdb-cluster.componentSelectorLabels" (list . "data") | nindent 6 }}
+  {{- if .Values.data.persistence.enabled }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: {{ .Values.data.persistence.reclaimPolicy }}
+    whenScaled: {{ .Values.data.persistence.reclaimPolicy }}
+  {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "influxdb-cluster.componentLabels" (list . "data") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/data-configmap.yaml") . | sha256sum }}
+        {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations .Values.data.podAnnotations)) }}
+        {{- . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "influxdb-cluster.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (include "influxdb-cluster.podSecurityContext" .Values.data.podSecurityContext) }}
+      securityContext:
+        {{- . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ int .Values.data.terminationGracePeriodSeconds }}
+      {{- with .Values.data.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- if .Values.initContainers.chownData.enabled }}
+        - name: chown-data
+          image: {{ printf "%s/%s:%s" (trimSuffix "/" .Values.initContainers.chownData.image.registry) .Values.initContainers.chownData.image.repository .Values.initContainers.chownData.image.tag }}
+          imagePullPolicy: {{ .Values.initContainers.chownData.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              # A freshly provisioned volume is root-owned on most drivers; a non-root pod
+              # could not create <mount>/data and would exit before the join could see it.
+              before="$(stat -c '%u:%g %a' {{ .Values.data.persistence.mountPath | quote }} 2>/dev/null || echo missing)"
+              chown -R {{ .Values.data.podSecurityContext.runAsUser | default 1001 }}:{{ .Values.data.podSecurityContext.runAsGroup | default 1001 }} {{ .Values.data.persistence.mountPath | quote }}
+              echo "chown {{ .Values.data.persistence.mountPath }}: $before -> $(stat -c '%u:%g %a' {{ .Values.data.persistence.mountPath | quote }})"
+          {{- with .Values.initContainers.chownData.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: {{ .Values.data.persistence.name }}
+              mountPath: {{ .Values.data.persistence.mountPath | quote }}
+        {{- end }}
+        {{- with .Values.data.extraInitContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      containers:
+        - name: influxd
+          # `sh -c` + exec exists for the per-pod INFLUXDB_HOSTNAME, which Kubernetes
+          # cannot interpolate ($VAR is not expanded in env[].value). exec keeps influxd
+          # as PID 1 so SIGTERM reaches it and the WAL closes cleanly.
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              : "${POD_NAME:?POD_NAME comes from the downward API}"
+              export INFLUXDB_HOSTNAME="${POD_NAME}.{{ include "influxdb-cluster.dataHeadlessName" . }}.{{ include "influxdb-cluster.suffix" . }}"
+              exec /entrypoint.sh influxd -config /etc/influxdb/influxdb.conf
+          image: {{ include "influxdb-cluster.image" (list . "data") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with (include "influxdb-cluster.containerSecurityContext" .Values.data.containerSecurityContext) }}
+          securityContext:
+            {{- . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- include "influxdb-cluster.authEnv" (dict "kind" "data" "Values" .Values) | nindent 12 }}
+            {{- with .Values.data.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.data.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ int .Values.ports.dataHTTP }}
+              protocol: TCP
+            - name: tcp
+              containerPort: {{ int .Values.ports.dataTCP }}
+              protocol: TCP
+            {{- range $input, $decl := .Values.data.inputs }}
+            {{- if $decl.enabled }}
+            - name: {{ $input | trunc 15 | trimSuffix "-" }}
+              containerPort: {{ int $decl.port }}
+              # collectd and the [udp] listeners are UDP; graphite and opentsdb are TCP
+              protocol: {{ ternary "UDP" "TCP" (or (eq $input "collectd") (eq $input "udp")) }}
+            {{- end }}
+            {{- end }}
+          {{- if (get .Values.data.probes "startup").enabled }}
+          startupProbe:
+            {{- include "influxdb-cluster.probe" (dict "mode" .Values.data.probeMode.startup "port" "http" "spec" (get .Values.data.probes "startup")) | nindent 12 }}
+          {{- end }}
+          {{- with (get .Values.data.probes "readiness") }}
+          readinessProbe:
+            {{- include "influxdb-cluster.probe" (dict "mode" $.Values.data.probeMode.readiness "port" "http" "spec" .) | nindent 12 }}
+          {{- end }}
+          {{- with (get .Values.data.probes "liveness") }}
+          livenessProbe:
+            {{- include "influxdb-cluster.probe" (dict "mode" $.Values.data.probeMode.liveness "port" "http" "spec" .) | nindent 12 }}
+          {{- end }}
+          {{- with .Values.data.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/influxdb
+              readOnly: true
+            - name: {{ .Values.data.persistence.name }}
+              mountPath: {{ .Values.data.persistence.mountPath | quote }}
+            {{- with .Values.data.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        {{- with .Values.data.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "influxdb-cluster.dataConfigName" . }}
+        {{- if not .Values.data.persistence.enabled }}
+        - name: {{ .Values.data.persistence.name }}
+          emptyDir: {}
+        {{- else if .Values.data.persistence.existingClaim }}
+        - name: {{ .Values.data.persistence.name }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.data.persistence.existingClaim }}
+        {{- end }}
+        {{- with .Values.data.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.data.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.data.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.data.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.data.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and .Values.data.persistence.enabled (not .Values.data.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ .Values.data.persistence.name }}
+        labels:
+          {{- include "influxdb-cluster.componentLabels" (list . "data") | nindent 10 }}
+        {{- with (include "influxdb-cluster.annotations" (list .Values.data.persistence.annotations)) }}
+        annotations:
+          {{- . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          - {{ .Values.data.persistence.accessMode }}
+        {{- with .Values.data.persistence.selector }}
+        selector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        {{- /* Omitted when empty so the cluster default StorageClass applies */}}
+        {{- with .Values.data.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.data.persistence.size | quote }}
+  {{- end }}

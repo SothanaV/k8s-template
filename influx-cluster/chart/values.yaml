@@ -1,0 +1,520 @@
+# Values for the self-contained InfluxDB Cluster chart in `chart/`.
+# Image: docker.io/chengshiwen/influxdb (https://hub.docker.com/r/chengshiwen/influxdb),
+# tags `<appVersion>-meta` (influxd-meta + influxd-ctl) and `<appVersion>-data`
+# (influxd + influx + influx_inspect).
+#
+# One placeholder, rejected at render time until you set it. Keep the real value in
+# values.local.yaml (matches the repo gitignore, never committed):
+#   <STORAGE_CLASS>   e.g. hpe-rwo / longhorn / csi-s3-block; "" uses the cluster default
+
+# -- Chart name used in object names. Empty = `influxdb-cluster` from Chart.yaml
+nameOverride: ""
+# -- Overrides the `<release>-<chart>` prefix. Pinned so the client Service host is
+# `influxdb-cluster-data.<namespace>.svc` whatever the release name is
+fullnameOverride: "influxdb-cluster"
+
+# -- Namespace baked into the pod hostnames nodes advertise to each other. Leave empty
+# to use the release namespace
+namespaceOverride: ""
+# -- Cluster DNS suffix (`<ns>.svc.<this>`) inside those hostnames
+clusterDomain: "cluster.local"
+
+# -- Labels merged into every rendered object
+commonLabels: {}
+# -- Annotations merged into every rendered object
+commonAnnotations: {}
+
+image:
+  # -- Registry. Point at an internal mirror if nodes cannot reach Docker Hub
+  registry: docker.io
+  # -- One repository for both node types. The `-meta` / `-data` tag suffix is added by
+  # the chart — do not repeat it here
+  repository: chengshiwen/influxdb
+  # -- Version part of the tag; keep equal to `appVersion` in Chart.yaml. Rendered tags
+  # are `<tag>-meta` and `<tag>-data`, e.g. 1.8.11-c1.2.0-meta
+  tag: "1.8.11-c1.2.0"
+  # -- Pin by digest instead of tag; BOTH entries are required because the two node
+  # types are two different tags:
+  #   digest: {meta: sha256:..., data: sha256:...}
+  digest: {}
+  pullPolicy: IfNotPresent
+
+# -- ImagePullSecrets names, only needed for a private mirror, e.g. `[harborSecret]`
+imagePullSecrets: []
+
+telemetry:
+  # -- `reporting-disabled`. The binaries post an anonymous usage line to
+  # usage.influxdata.com once per 24h; true turns it off. There is no egress needed for
+  # the cluster itself, so a network policy may simply drop it
+  disableReporting: true
+
+# -- Ports this chart owns. They are part of the addresses registered with
+# `influxd-ctl`, so changing one after the first boot means re-forming the cluster — see
+# README "Changing ports"
+ports:
+  # -- Meta HTTP API: what `influxd-ctl` talks to and the address registered by
+  # `add-meta`
+  metaAPI: 8091
+  # -- Meta raft, meta node to meta node
+  metaRaft: 8089
+  # -- Data HTTP API: the client endpoint (write/query), published by the data Service
+  dataHTTP: 8086
+  # -- Data TCP (RPC + gossip), the address registered by `influxd-ctl add-data`
+  dataTCP: 8088
+
+meta:
+  # -- Odd number >= 3 for HA (raft quorum), or 1 for a single meta node started with
+  # `-single-server`. Even numbers are rejected at render time
+  replicas: 3
+  image: {}
+  # -- Extra plain `env` entries. Any `INFLUXDB_<SECTION>_<FIELD>` variable overrides the
+  # matching config key (that is how this chart injects secrets: influxdb does not expand
+  # `${VAR}` in config files)
+  env: []
+  # -- `envFrom` entries, e.g. `[- secretRef: {name: my-extra-meta-env}]`
+  envFrom: []
+  # -- Keys spliced into `[meta]` beside the ones this chart owns (`dir`,
+  # `bind-address`, `http-bind-address`). Raft tuning goes here
+  raft: {}
+  #   gossip-frequency: 5s
+  #   heartbeat-timeout: 1s
+  #   lease-duration: 1m0s
+  # -- `[logging]` block (`format`, `level`, `suppress-logo`)
+  logging:
+    level: info
+  # -- Whole extra TOML sections, rendered last, as `section: {key: value}`. Sections
+  # this chart renders (`meta`, `logging`) and keys it derives from pod identity are
+  # rejected at render time
+  config: {}
+  #   tls:
+  #     min-version: tls1.2
+  terminationGracePeriodSeconds: 60
+  persistence:
+    # -- false gives an ephemeral node: the raft store dies with the pod. Needs
+    # cluster.allowEphemeral: true to render
+    enabled: true
+    # -- Volume / claim-template name
+    name: data
+    # -- One mount for everything the node writes; the raft store lives at
+    # `<mountPath>/meta`. Matches the image's VOLUME at /var/lib/influxdb
+    mountPath: /var/lib/influxdb
+    # -- "" uses the cluster default StorageClass. A placeholder value fails the render
+    storageClass: "<STORAGE_CLASS>"
+    accessMode: ReadWriteOnce
+    # -- The raft store stays in the megabytes even with thousands of shards
+    size: 1Gi
+    # -- Bind an existing PVC (its name) instead of provisioning one
+    existingClaim: ""
+    # -- `Retain` (StatefulSet policy) keeps volumes through `helm uninstall`
+    reclaimPolicy: Retain
+    selector: {}
+    annotations: {}
+  service:
+    # -- `ClusterIP` only: the meta API is an admin plane, not a client endpoint
+    type: ClusterIP
+    clusterIP: ""
+    annotations: {}
+    extraPorts: []
+  pdb:
+    # -- PodDisruptionBudget. Refused while meta.replicas is 1, where any budget blocks
+    # every voluntary eviction
+    enabled: true
+    # -- Exactly one of minAvailable / maxUnavailable
+    minAvailable: 2
+    maxUnavailable: null
+  # -- Probe per probe: `tcp` (port open — the safe default), `http` (GET /ping) or
+  # `none`. Keep `tcp` on readiness: the meta /ping body stays empty until a leader
+  # exists, so an HTTP readiness probe deadlocks the bootstrap (README "Probes")
+  probeMode:
+    startup: tcp
+    readiness: tcp
+    liveness: tcp
+  probes:
+    startup:
+      enabled: true
+      periodSeconds: 5
+      failureThreshold: 60
+      timeoutSeconds: 5
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 6
+    liveness:
+      initialDelaySeconds: 30
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 6
+  # -- Meta nodes keep only raft state; the defaults are deliberate, not lazy sizing
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  # -- Sidecars added to meta pods; each needs at least `name` and `image`
+  extraContainers: []
+  extraInitContainers: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  # -- Soft (preferred) anti-affinity on purpose: a 3-meta cluster must still schedule on
+  # a 2-node test cluster
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: meta
+  topologySpreadConstraints: []
+  hostAliases: []
+  # -- `enabled: false` keeps the images' own default (root), which is what the upstream
+  # volume ownership expects and the only mode verified end-to-end. With `enabled: true`
+  # the `auto` sentinels become uid/gid/fsGroup 1001; on provisioners that ignore
+  # fsGroup also keep initContainers.chownData.enabled: true
+  podSecurityContext:
+    enabled: false
+    runAsUser: auto
+    runAsGroup: auto
+    fsGroup: auto
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+data:
+  # -- At least 2 for redundancy. Every `cluster.databases` replication factor must be
+  # <= this
+  replicas: 2
+  image: {}
+  env: []
+  envFrom: []
+  # -- Seconds between SIGTERM and SIGKILL. Give the WAL room to close: a killed data node
+  # replays its WAL on the next start
+  terminationGracePeriodSeconds: 60
+  # -- `[gossip-frequency]`: how often the node re-announces itself to the meta nodes.
+  # Below ~1s the meta nodes' 30s announcement expiry starts racing pod restarts
+  gossipFrequency: "3s"
+  # -- Keys spliced into `[data]` (the TSM engine): `index-max-concurrent-compactions`,
+  # `cache-max-memory-size`, `compact-full-write-cold-duration`, ...
+  tsdb: {}
+  # -- `[coordinator]` block (this project uses `[coordinator]`, where InfluxDB
+  # Enterprise uses `[cluster]`)
+  coordinator: {}
+  # -- `[hinted-handoff]` block; `dir` is owned by the chart
+  hintedHandoff: {}
+  # -- `[retention]`, `[shard-precreation]`, `[monitor]`, `[subscriber]`,
+  # `[continuous_queries]` blocks live in `config` below
+  http:
+    # -- false renders `[http] enabled = false`: InfluxQL read/write over HTTP still
+    # works, the v1 UI does not
+    enabled: true
+    # `[http] auth-enabled` and `[http] shared-secret` are NOT here: they come from
+    # cluster.auth.http, injected as environment variables, because a config file cannot
+    # carry a secret (influxdb does not expand ${VAR} inside TOML)
+    # -- `[http] realm` for WWW-Authenticate
+    realm: "InfluxDB"
+    # -- `[http] max-body-size` in bytes; 0 keeps the binary default
+    maxBodySize: 0
+    # -- `[http] flux-enabled`; this fork's Flux support is partial and the v1 UI is
+    # usually replaced by Chronograf, so it is off by default
+    flux:
+      enabled: false
+    # -- extra `[http]` keys (`enabled`, `auth-enabled`, `shared-secret`,
+    # `https-enabled`, `realm` are chart-owned here)
+    config: {}
+  # -- Line-protocol / stats listeners. Each enabled input renders its TOML
+  # array-of-tables entry AND a Service port, so flipping `enabled` alone cannot leave
+  # the port closed. `bind-address` is derived from `port: 0.0.0.0:<port>`
+  inputs:
+    graphite:
+      enabled: false
+      port: 2003
+      config: {}
+    collectd:
+      enabled: false
+      port: 25826
+      config: {}
+    opentsdb:
+      enabled: false
+      port: 4242
+      config: {}
+    udp:
+      enabled: false
+      # -- 8089 is taken by meta raft, so the default influxdb UDP stats port is not used
+      port: 8125
+      config: {}
+  # -- Extra whole TOML sections, rendered last. `meta`, `data`, `http`,
+  # `hinted-handoff`, `coordinator`, `logging`, `graphite`, `collectd`, `opentsdb`,
+  # `udp` are rejected because the chart renders them
+  config: {}
+  #   retention:
+  #     enabled: true
+  #   tls:
+  #     min-version: tls1.2
+  # -- Escape hatch appended verbatim to `influxdb.conf` for what flat YAML cannot
+  # express: several `[[graphite]]` entries with nested `templates = [[...]]`, a second
+  # `[[udp]]` listener, and so on. Rendered last, so it wins over the sections above.
+  # `helm template ... | yq` will NOT parse hand-written duplicates of a section the
+  # chart already wrote — that is a TOML error influxd reports at start, not a YAML one
+  rawExtra: ""
+  persistence:
+    enabled: true
+    name: data
+    # -- Single mount; `[data] dir`, `wal-dir` and `[hinted-handoff] dir` render as
+    # `<mountPath>/data`, `<mountPath>/wal`, `<mountPath>/hh`
+    mountPath: /var/lib/influxdb
+    storageClass: "<STORAGE_CLASS>"
+    accessMode: ReadWriteOnce
+    size: 20Gi
+    existingClaim: ""
+    reclaimPolicy: Retain
+    selector: {}
+    annotations: {}
+  service:
+    # -- `ClusterIP`: put your own proxy or L7 balancer in front. InfluxDB Cluster is
+    # not a load balancer, and any data node accepts writes for the whole cluster
+    type: ClusterIP
+    port: 8086
+    # -- Also publish the data TCP port (8088) on this Service. Keep false: node-to-node
+    # traffic must address individual pods, which is what the headless Service is for
+    includeTCP: false
+    clusterIP: ""
+    # -- Fixed port when `type: NodePort`
+    nodePort: null
+    annotations: {}
+    extraPorts: []
+  headlessService:
+    # -- Governing Service of the data StatefulSet and the source of the advertised
+    # `<pod>.<headless>` hostname. Disabling it breaks re-joining after a restart
+    enabled: true
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: influxdb.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+  pdb:
+    enabled: true
+    minAvailable: 1
+    maxUnavailable: null
+  probeMode:
+    startup: tcp
+    readiness: tcp
+    liveness: tcp
+  probes:
+    startup:
+      enabled: true
+      periodSeconds: 5
+      failureThreshold: 120
+      timeoutSeconds: 5
+    readiness:
+      # -- A data node reports Ready as soon as its port is open; it is NOT a statement
+      # that the node has joined the cluster. `helm test` and the join Job decide that
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 6
+    liveness:
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      timeoutSeconds: 5
+      failureThreshold: 6
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  extraContainers: []
+  extraInitContainers: []
+  extraVolumes: []
+  extraVolumeMounts: []
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: data
+  topologySpreadConstraints: []
+  hostAliases: []
+  podSecurityContext:
+    enabled: false
+    runAsUser: auto
+    runAsGroup: auto
+    fsGroup: auto
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+# -- Everything about forming and seeding the cluster
+cluster:
+  joiner:
+    # -- Runs `influxd-ctl add-meta` for each meta pod and `add-data` for each data pod.
+    # With this off the install is only six pods that never talk: no raft leader, no
+    # shard mapping (README "Manual joining" for the manual route)
+    enabled: true
+    # -- `post-upgrade` makes `--set data.replicas=3` self-service: a new ordinal is only
+    # a cluster member once `add-data` has named it, and the Job skips addresses
+    # `influxd-ctl show` already lists, so re-running registers the new ones only
+    hooks:
+      - post-install
+      - post-upgrade
+    # -- `helm.sh/hook-delete-policy`. `before-hook-creation` is required (without it a
+    # re-run collides with the Job of the same name) and `hook-succeeded` is what makes a
+    # successful run self-cleaning — at the cost of the Job and its logs disappearing the
+    # moment it works, so `kubectl logs job/...-join` finds nothing. Drop
+    # `hook-succeeded` if you want the log kept as the install record
+    hookDeletePolicy:
+      - before-hook-creation
+      - hook-succeeded
+    # -- Job-level retries; each attempt re-waits inside the script, so a slow volume
+    # provisioner costs one retry instead of a failed release
+    backoffLimit: 6
+    activeDeadlineSeconds: 900
+    # -- Kubernetes Job `ttlSecondsAfterFinished`; "" leaves the finished Job until the
+    # next hook run cleans it up
+    ttlSecondsAfterFinished: ""
+    # -- Set true only to have the Job create databases without joining nodes (it then
+    # fails fast instead of hanging when no database can be created)
+    joinOnly: false
+    createDatabases: true
+    # -- Image for the Job. It must contain `influxd-ctl` AND `curl`: only the meta image
+    # has both (the data image has `influx`, no `influxd-ctl`), so only the repository or
+    # a mirror registry normally needs changing
+    image:
+      registry: ""
+      repository: ""
+      tag: ""
+      digest: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 500m
+        memory: 256Mi
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    podSecurityContext:
+      # -- The script needs bash, curl, influxd-ctl and a writable /tmp only
+      enabled: true
+      runAsUser: auto
+      runAsGroup: auto
+      fsGroup: auto
+    containerSecurityContext:
+      enabled: true
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: false
+      capabilities:
+        drop:
+          - ALL
+  # -- Databases created after the nodes join: name -> replication factor. Replication
+  # is the per-database copy count; a factor of 1 means losing one data node loses that
+  # database until the copies are rebalanced
+  databases:
+    mydb: 2
+  # -- The Job's per-wait budgets, shared by all wait steps
+  waitFor:
+    # -- Max seconds a meta pod's API port may stay closed before the Job gives up
+    portTimeoutSeconds: 300
+    # -- Max seconds to wait for a raft leader after registering the meta nodes
+    leaderTimeoutSeconds: 180
+    # -- Max seconds for every data node to appear in `influxd-ctl show`
+    dataJoinTimeoutSeconds: 300
+  # -- true lets ephemeral persistence render. Both nodes' data then dies with the pod
+  allowEphemeral: false
+  # -- Admin user the Job creates once the cluster has a leader, so the authentication
+  # phases below have a subject to authenticate against. Not created by the chart:
+  #
+  #   kubectl -n <namespace> create secret generic influxdb-cluster-admin-secret \
+  #     --from-literal=username=admin --from-literal=password="<HTTP_ADMIN_PASSWORD>"
+  adminUser:
+    enabled: true
+    existingSecret: influxdb-cluster-admin-secret
+    userKey: username
+    passwordKey: password
+    # -- Grant `WITH ALL PRIVILEGES`. With this false you cannot turn authentication on
+    # at all: the meta API refuses every request until an ADMIN user exists
+    admin: true
+  # -- Authentication is a SECOND helm upgrade, never the first install. The meta HTTP
+  # API answers "must create admin user first" to every request — including /ping — the
+  # moment `[meta] auth-enabled = true` without an admin user in raft, and the only way
+  # to create that user is through that same API. Order (README "Authentication"):
+  #   1. install with both flags false -> the Job creates cluster.adminUser
+  #   2. upgrade with `.http: true`  -> data [http] auth-enabled
+  #   3. upgrade with `.meta: true`  -> meta [meta] auth-enabled + influxd-ctl JWT
+  auth:
+    http: false
+    meta: false
+    # -- Typed acknowledgement that an admin user already exists. Required to render
+    # either flag above as true; set it after `SHOW USERS` lists the admin user
+    acknowledged: ""
+    # -- Secret holding the shared secrets used for meta JWT auth and for data-API bearer
+    # tokens. Read by BOTH node types and by the Job (`influxd-ctl -auth-type jwt
+    # -secret ...`), two different keys, two different secrets — do not reuse one value
+    # for both. Not created by the chart:
+    #
+    #   kubectl -n <namespace> create secret generic influxdb-cluster-meta-secret \
+    #     --from-literal=shared-secret="<SHARED_SECRET>" \
+    #     --from-literal=meta-internal-shared-secret="<INTERNAL_SHARED_SECRET>"
+    #
+    # both at least 16 characters
+    secretName: influxdb-cluster-meta-secret
+    sharedSecretKey: shared-secret
+    internalSharedSecretKey: meta-internal-shared-secret
+
+initContainers:
+  # -- `chown -R` the data volume before the node starts. Needed only when a
+  # podSecurityContext assigns a non-root uid on a provisioner that ignores fsGroup;
+  # slow on volumes with many shards, and it is deliberately not a hook
+  chownData:
+    enabled: false
+    image:
+      registry: docker.io
+      repository: busybox
+      tag: "1.37"
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 10m
+        memory: 16Mi
+      limits:
+        cpu: 500m
+        memory: 128Mi
+
+# -- Explicit ServiceAccount instead of the namespace `default`. Nothing here calls the
+# Kubernetes API (the join Job shells to `influxd-ctl` over the cluster network), so
+# create one only to satisfy a cluster policy
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+
+tests:
+  # -- Renders the `helm test` pod: /ping through the data Service, then one write and
+  # one read against the load-balanced Service, which proves DNS, the Service selectors,
+  # and that some data node owns a shard for the database
+  enabled: true

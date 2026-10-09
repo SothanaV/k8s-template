@@ -1,0 +1,50 @@
+{{/*
+Client entry point: a load-balanced front end over the data nodes. Any data node accepts
+writes for the whole cluster (unowned shards are forwarded, or hinted-handoff-queued if
+the owning node is down), so a plain round-robin Service is the documented pattern —
+InfluxDB Cluster ships no load balancer of its own.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "influxdb-cluster.dataName" . }}
+  labels:
+    {{- include "influxdb-cluster.componentLabels" (list . "data") | nindent 4 }}
+  {{- with (include "influxdb-cluster.annotations" (list .Values.commonAnnotations .Values.data.service.annotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.data.service.type }}
+  {{- if and (eq .Values.data.service.type "ClusterIP") .Values.data.service.clusterIP }}
+  clusterIP: {{ .Values.data.service.clusterIP | quote }}
+  {{- end }}
+  ports:
+    - name: http
+      port: {{ int .Values.data.service.port }}
+      targetPort: http
+      protocol: TCP
+      {{- if and (eq .Values.data.service.type "NodePort") .Values.data.service.nodePort }}
+      nodePort: {{ int .Values.data.service.nodePort }}
+      {{- end }}
+    {{- if and .Values.data.service.includeTCP .Values.data.headlessService.enabled }}
+    # Kept behind data.headlessService.enabled: the TCP address registered with the meta
+    # nodes is per-pod, so a ClusterIP in front of it is at best useless
+    - name: tcp
+      port: {{ int .Values.ports.dataTCP }}
+      targetPort: tcp
+      protocol: TCP
+    {{- end }}
+    {{- range $input, $decl := .Values.data.inputs }}
+    {{- if $decl.enabled }}
+    - name: {{ $input | trunc 15 | trimSuffix "-" }}
+      port: {{ int $decl.port }}
+      targetPort: {{ $input | trunc 15 | trimSuffix "-" }}
+      protocol: {{ ternary "UDP" "TCP" (or (eq $input "collectd") (eq $input "udp")) }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.data.service.extraPorts }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  selector:
+    {{- include "influxdb-cluster.componentSelectorLabels" (list . "data") | nindent 4 }}
