@@ -18,6 +18,7 @@ Helm chart templates and custom values for self-hosted Kubernetes services.
 | [Databasus](databasus/README.md) | Database backup manager | `databasus` |
 | [GitLab](gitlab/README.md) | Self-hosted DevOps platform | `gitlab` |
 | [GitLab Runner](gitlab-runner/README.md) | CI/CD runner for GitLab | `gitlab-runner` |
+| [Grafana MCP](grafana-mcp/README.md) | MCP server for Grafana (`mcp-grafana`), streamable HTTP | `grafana` |
 | [InfluxDB](influx/README.md) | Time-series database (nginx sidecar for subpath) | `influx` |
 | [InfluxDB Cluster](influx-cluster/README.md) | Sharded InfluxDB (meta + data, auto-join chart) | *(per release)* |
 | [kube-prometheus-stack](prometheus-stack/README.md) | Cluster monitoring and alerting | `monitoring` |
