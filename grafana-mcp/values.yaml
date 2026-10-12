@@ -1,0 +1,144 @@
+# Values for the upstream chart `grafana/grafana-mcp`.
+#
+# The upstream chart is deprecated (Chart.yaml `deprecated: true` from 0.3.1) and its
+# maintenance moved to the `grafana-community` repo, so install it from there:
+#
+#   helm repo add grafana-community https://grafana-community.github.io/helm-charts
+#   helm upgrade --install grafana-mcp grafana-community/grafana-mcp \
+#     -n grafana --version <CHART_VERSION> -f grafana-mcp/values.yaml
+#
+# This file was rendered against grafana-community/grafana-mcp 0.27.2 (appVersion 2.0.2)
+# and against grafana/grafana-mcp 0.3.1: every key below exists in both, so either repo
+# works with `--version` pinned. README "Installation / Method A" step 2 re-checks that
+# against whatever version you pick.
+#
+# Method B (./custom) is the alternative chart, and the method that installed the release
+# currently running in `grafana` on the production cluster.
+#
+# Placeholders to replace, ideally in a gitignored values.local.yaml copy:
+#   <project>   registry project/organisation, e.g. mom-analytics
+#   <IMAGE_TAG> a pinned tag. `latest`/`main` means any re-deploy can pick up something
+#               different from what is running today
+replicas: 1
+
+image:
+  registry: reg.magnecomp.com
+  repository: <project>/grafana-grafana-mcp
+  # -- The chart's appVersion is `latest`, which is not a pin. This tag must be set.
+  tag: <IMAGE_TAG>
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: reg-magnecomp-secret
+
+# -- Grafana this server talks to, over cluster-internal DNS. The public Grafana URL is
+# what end users see; do not put it here. The `/grafana` suffix matches how the Grafana
+# release here serves its API — drop it if your Grafana is served from `/`
+grafana:
+  url: "http://grafana-prd.grafana:3000/grafana"
+  # -- Leave empty. It becomes `GRAFANA_SERVICE_ACCOUNT_TOKEN | b64enc` in a chart-managed Secret,
+  # and the whole value then also sits in `helm get values` and in the release secret
+  apiKey: ""
+  apiKeySecret:
+    # -- Pre-created (README: Prerequisites)
+    name: grafana-mcp-api-key
+    key: api-key
+
+debug: false
+
+# -- Each entry becomes `--disable-<entry>`. Everything here is disabled-by-default
+# upstream anyway; listing it documents intent
+disabledCategories:
+  - oncall
+
+# -- The upstream image ENTRYPOINT is `[mcp-grafana, --transport, sse, --address,
+# 0.0.0.0:8000]` and the chart only appends `args`, so the transport has to be overridden
+# here to get streamable HTTP
+extraArgs:
+  - -t
+  - streamable-http
+  - --address
+  - 0.0.0.0:8000
+  # -- Host/Origin validation applies to every route of this listener, including httpGet
+  # probes. `*` trusts the proxy to validate Host
+  - --allowed-hosts
+  - "*"
+
+# -- Plain extra environment. GRAFANA_ORG_ID silences the "No org ID found" warnings
+env: {}
+#   GRAFANA_ORG_ID: "1"
+
+# -- Environment from Secret/ConfigMap references. This is where MCP_GRAFANA_SERVER_TOKEN
+# belongs — it makes clients send `Authorization: Bearer <token>`
+envValueFrom: {}
+#   MCP_GRAFANA_SERVER_TOKEN:
+#     secretKeyRef:
+#       name: grafana-mcp-server-token
+#       key: MCP_GRAFANA_SERVER_TOKEN
+
+envFrom: []
+
+# -- Both default to {} on purpose. The image has no HEALTHCHECK, and httpGet probes on
+# the main listener are rejected with 403 by Host/Origin validation unless
+# --allowed-hosts covers the pod IP/hostname. Use tcpSocket, or start the server with
+# `--healthz-address :8080` and probe that port
+readinessProbe: {}
+livenessProbe: {}
+startupProbe: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  automountServiceAccountToken: false
+
+service:
+  enabled: true
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    # -- Subpath deployment: strip <subpath> and hand the rest to the server, which
+    # serves /mcp and /sse at its root
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    # -- Tool responses (full dashboard JSON) are large; do not let nginx reject them
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+  hosts:
+    - host: wn-a-prd-ai-k8s.tlnw.magnecomp.com
+      paths:
+        - path: /grafana-mcp(/|$)(.*)
+          pathType: ImplementationSpecific
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -- Upstream defaults, matching the non-root uid 1000 in the upstream Dockerfile.
+# A mirror image built from that Dockerfile keeps them
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+
+securityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
