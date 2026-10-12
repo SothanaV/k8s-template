@@ -1,0 +1,193 @@
+# Default values for the mcp-grafana chart in this directory (method B).
+#
+#   helm template grafana-mcp grafana-mcp/custom -n grafana \
+#     -f grafana-mcp/custom/values.local.yaml
+#   helm upgrade --install grafana-mcp grafana-mcp/custom -n grafana \
+#     -f grafana-mcp/custom/values.local.yaml
+#
+# Placeholders are rejected at render time by templates/_helpers.tpl. Keep real values in
+# values.local.yaml (repo gitignore: *.local.yaml), never here:
+#   reg.magnecomp.com/<project>/grafana-grafana-mcp:<IMAGE_TAG>
+#     <project>    registry project/organisation, e.g. mom-analytics
+#     <IMAGE_TAG>  a pinned tag. `tag: main` + `pullPolicy: Always` — the live release's
+#                  pairing — means a re-deploy can pull a different binary than the one
+#                  running today. `image.digest` is the only real pin
+#   <INGRESS_HOST> public ingress host, e.g. wn-a-prd-ai-k8s.tlnw.magnecomp.com
+
+# -- Chart name used in object names. Empty = `mcp-grafana` from Chart.yaml
+nameOverride: ""
+# -- Overrides the `<release>-<chart>` prefix. Left empty so release `grafana-mcp`
+# renders `grafana-mcp-mcp-grafana`, matching the names of the objects already live in
+# namespace `grafana`. To take over those objects under another release name, set this
+# to their existing name
+fullnameOverride: ""
+
+# -- Labels merged into every rendered object
+commonLabels: {}
+# -- Annotations merged into every rendered object
+commonAnnotations: {}
+
+replicaCount: 1
+# -- Bounds the persisted Helm release secrets. Each one stores the rendered manifest, so
+# with `secret.create: true` every stored revision holds the token in plaintext
+revisionHistoryLimit: 5
+
+image:
+  # -- Full `registry/repository`, so there is no separate registry key. A Docker Hub
+  # value (`grafana/mcp-grafana`) works unchanged
+  repository: reg.magnecomp.com/<project>/grafana-grafana-mcp
+  tag: <IMAGE_TAG>
+  # -- `sha256:` digest replaces the tag in the image reference; set `tag: ""` with it
+  digest: ""
+  # -- `Always` re-resolves a mutable tag on every pod start. Pair it with `tag: main`
+  # only when that is what you want; with a pinned tag use `IfNotPresent`
+  pullPolicy: IfNotPresent
+
+# -- Only needed for a private mirror
+imagePullSecrets:
+  - name: reg-magnecomp-secret
+
+# -- Port the container listens on, matching `--address` in `command`
+containerPort: 8000
+
+# -- Container command, replacing the image ENTRYPOINT
+# (`["/app/mcp-grafana","--transport","sse","--address","0.0.0.0:8000"]`). The binary path
+# must match the image: `./mcp-grafana` resolves against its WORKDIR `/app`
+command:
+  - ./mcp-grafana
+  - -t
+  - streamable-http
+  - --address
+  - 0.0.0.0:8000
+  # -- Host/Origin validation applies to every route on this listener. `*` means the
+  # proxy is trusted to validate Host; it also keeps httpGet probes from being 403'd
+  - --allowed-hosts
+  - "*"
+  # -- Turns TLS verification off entirely. Right answer for an internal endpoint with a
+  # self-signed certificate; for a real CA use `--tls-ca-file` plus a mounted volume
+  - --tls-skip-verify
+
+# -- Plain `args:` list appended after `command`. Rendered only when non-empty. There is no
+# org-id flag: pin the organization with GRAFANA_ORG_ID (the `env` map or the credential
+# Secret), or let clients send X-Grafana-Org-Id per request
+args: []
+
+# -- Non-secret extra environment on the container. Everything secret comes through the
+# Secret in `secret.*`. GRAFANA_ORG_ID stops the per-request "No org ID found in request
+# headers" warnings
+env: {}
+#   GRAFANA_ORG_ID: "1"
+
+# -- Full EnvVar entries, for anything sensitive that is not in `secret.existingSecret`
+extraEnvVars: []
+#   - name: MCP_GRAFANA_SERVER_TOKEN
+#     valueFrom:
+#       secretKeyRef:
+#         name: grafana-mcp-server-token
+#         key: MCP_GRAFANA_SERVER_TOKEN
+
+# -- Extra `envFrom` entries, appended after the credential Secret
+envFrom: []
+
+# -- How the container receives GRAFANA_URL and GRAFANA_SERVICE_ACCOUNT_TOKEN
+secret:
+  # -- Pre-created Secret, mounted through `envFrom` (recommended). README
+  # "Prerequisites" has the `kubectl create secret generic` command
+  existingSecret: grafana-mcp-secret
+  # -- Render a Secret from `plainText` instead. This is what the live release does, and
+  # why its token shows up in `helm get values --all` and in every stored revision
+  create: false
+  # -- Name of the rendered Secret. The default matches the live object
+  # `grafana-mcp-mcp-grafana-env`
+  name: ""
+
+# -- Input for `secret.create: true` only: map of key/value pairs. Never put a real token
+# in this tracked file
+plainText: {}
+#   GRAFANA_URL: "http://grafana-prd.grafana:3000/grafana"
+#   GRAFANA_SERVICE_ACCOUNT_TOKEN: "<grafana-service-account-token>"
+
+serviceAccount:
+  # -- A string, not a map. Leaving this as `{}` renders
+  # `serviceAccountName: map[create:true name:]`, the exact value the live release's
+  # revision 1 was rejected for
+  create: true
+  # -- Empty string lets the template use the rendered fullname
+  name: ""
+  annotations: {}
+  # -- The server needs no Kubernetes API access
+  automountServiceAccountToken: false
+
+service:
+  type: ClusterIP
+  # -- Service-side port; the live Service is 8008 -> targetPort 8000
+  port: 8008
+  targetPort: 8000
+  annotations: {}
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    # -- Subpath deployment: the server serves /mcp and /sse at its own root, so the
+    # subpath has to be stripped before proxying
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    # -- Tool responses (full dashboard JSON) are large
+    nginx.ingress.kubernetes.io/proxy-body-size: "0"
+  hosts:
+    - host: <INGRESS_HOST>
+      # -- Rendered literally, so a trailing slash silently changes what the rewrite
+      # hands to the server. Clients connect at <path>/mcp
+      paths:
+        - path: /grafana-mcp(/|$)(.*)
+          pathType: ImplementationSpecific
+  tls: []
+  labels: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -- Probes are off by default. The image ships no HEALTHCHECK, and an httpGet probe on
+# the main listener sends `Host: <pod-ip>:8000`, which Host validation rejects with 403
+# unless --allowed-hosts covers it. Start the server with `--healthz-address :8080` for a
+# clean target, set `probes.port: 8080`, then enable this
+probes:
+  enabled: false
+  path: /healthz
+  # -- 0 means "use `containerPort`"
+  port: 0
+  startup:
+    # -- Covers process start only; there is no migration work on boot
+    periodSeconds: 5
+    failureThreshold: 40
+    timeoutSeconds: 3
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  liveness:
+    periodSeconds: 30
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+# -- For a CA bundle (`--tls-ca-file`) or a token file
+# (`GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE`, which the server re-reads per request)
+volumes: []
+volumeMounts: []
+
+# -- The upstream Dockerfile runs as uid 1000 and writes only to /tmp. Both contexts are
+# empty to match the live Deployment: turning on `readOnlyRootFilesystem` also needs an
+# emptyDir at /tmp, and applying a stricter policy than what runs today takes over a
+# working release
+podSecurityContext: {}
+containerSecurityContext: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

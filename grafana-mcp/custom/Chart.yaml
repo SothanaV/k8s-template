@@ -1,0 +1,21 @@
+apiVersion: v2
+name: mcp-grafana
+description: Grafana MCP server (grafana/mcp-grafana) over streamable HTTP — Deployment, Service, Ingress, credential Secret reference
+type: application
+# -- Version of this Chart.yaml, not of mcp-grafana. Bump on every chart edit so
+# `helm history <release>` stays traceable
+version: 0.1.0
+# -- Should equal the tag of the image you deploy (image.tag). The live release pairs
+# it with `latest`/`main` tags, which is exactly the drift this line exists to prevent
+appVersion: latest
+keywords:
+  - mcp
+  - grafana
+  - monitoring
+  - model-context-protocol
+home: https://github.com/grafana/mcp-grafana
+sources:
+  - https://github.com/grafana/mcp-grafana
+  - https://github.com/grafana/helm-charts/tree/main/charts/grafana-mcp
+maintainers:
+  - name: sothana

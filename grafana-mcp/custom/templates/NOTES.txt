@@ -1,0 +1,58 @@
+{{- $fullName := include "mcp-grafana.fullname" . -}}
+Grafana MCP server (mcp-grafana {{ .Values.image.tag | default .Chart.AppVersion }}) — release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+1. Wait for the pod:
+
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ $fullName }} --timeout=3m
+   kubectl -n {{ .Release.Namespace }} logs deploy/{{ $fullName }} --tail=20
+   {{- if .Values.probes.enabled }}
+
+   Probes are enabled against {{ .Values.probes.path }} on port {{ include "mcp-grafana.probePort" . }}.
+   If the pod never goes Ready and the probe log shows 403, Host/Origin validation is
+   rejecting the probe: run the server with `--healthz-address`, point probes.port at that
+   listener, or cover the pod hostname with `--allowed-hosts`.
+   {{- else }}
+
+   Probes are disabled, so the Deployment reports Ready as soon as the container starts,
+   which says nothing about the server. Read the logs above.
+   {{- end }}
+
+2. The MCP endpoint is the ingress host, the subpath, and the transport path:
+   {{- if .Values.ingress.enabled }}
+   {{- $proto := "http" }}{{- if .Values.ingress.tls }}{{ $proto = "https" }}{{ end }}
+   {{- range .Values.ingress.hosts }}
+   {{ $proto }}://{{ .host }}{{ trimSuffix "(/|$)(.*)" ((index .paths 0).path) }}/mcp
+   {{- end }}
+   {{- end }}
+
+   Cluster-internal: http://{{ $fullName }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/mcp
+   Locally:          kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullName }} {{ .Values.service.port }}
+                     then http://127.0.0.1:{{ .Values.service.port }}/mcp
+
+   **In that URL the /mcp suffix is required and no trailing slash is allowed.** SSE-only
+   clients use /sse instead. Test through port-forward first, to rule out rewrite issues.
+
+3. Connection settings come from Secret {{ include "mcp-grafana.secretName" . }}; list its
+   keys without printing values:
+
+   kubectl -n {{ .Release.Namespace }} get secret {{ include "mcp-grafana.secretName" . }} \
+     -o jsonpath='{.data}' | tr ',' '\n' | cut -d'"' -f2
+
+   GRAFANA_URL is the API base of the Grafana instance, including its subpath when it has
+   one, and must be reachable from this pod. GRAFANA_SERVICE_ACCOUNT_TOKEN needs at least
+   datasources:read, datasources:query, dashboards:read.
+
+4. When tools answer but every call fails, check that Grafana itself is reachable from the
+   same namespace (GRAFANA_URL comes from the Secret):
+
+   URL=$(kubectl -n {{ .Release.Namespace }} get secret {{ include "mcp-grafana.secretName" . }} \
+     -o jsonpath='{.data.GRAFANA_URL}' | base64 -d)
+   kubectl -n {{ .Release.Namespace }} run gmcp-check --rm -it --restart=Never \
+     --image=curlimages/curl:8 -- curl -s -o /dev/null -w "%{http_code}\n" "$URL/api/health"
+
+Uninstall:
+
+   helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+The credential Secret is not owned by the release and survives it, by design.
+README.md in the parent directory covers upgrading, rollback, and troubleshooting.
