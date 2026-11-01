@@ -1,24 +1,35 @@
 deployment:
   replicas: 3
+ingressRoute:
+  dashboard:
+    enabled: false
 ingressClass:
   enabled: true
-  isDefaultClass: false
-  name: traefik-private
+  isDefaultClass: true
+  name: traefik
 ports:
   web:
-    nodePort: 32080
+    nodePort: 30080
   websecure:
-    nodePort: 32443
+    nodePort: 30443
 providers:
   kubernetesIngress:
-    enabled: false
+    enabled: false            
   kubernetesIngressNGINX:
     enabled: true
-    ingressClass: traefik-private
+    ingressClass: traefik
     ingressClassByName: true
-    publishService:
-      enabled: false
+    publishService:          
+      enabled: true
     watchIngressWithoutClass: false
 service:
   spec:
     type: NodePort
+
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/etcd
+    operator: Exists
+    effect: NoExecute
