@@ -1,0 +1,39 @@
+{{/*
+Headless Service: the StatefulSet's governing Service, and the only DNS entry point for
+the database pods. Two things about it are load-bearing:
+
+  * It is what creates the per-pod A records (`pg-ha-0.pg-ha-headless.<ns>.svc...`) that
+    repmgr stores in its metadata and that pgcat's server list is built from. Renaming it
+    orphans every registration in the volumes.
+  * `publishNotReadyAddresses: true`, so a pod keeps resolving while it is Not Ready.
+    Default (false) would remove a pod from DNS the moment its readiness probe goes red —
+    which is exactly during a promotion, a `pg_rewind`, or a restart, when its peers most
+    need to reach it for repmgrd pings, `standby follow`, and `pg_rewind`.
+
+There is deliberately NO ClusterIP Service in front of these pods: a plain Service
+load-balances across all nodes, and a write that lands on a standby fails with
+"cannot execute ... in a read-only transaction". pgcat is the client entry point; reach a
+specific node through its pod DNS when you need to.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sothanav-ha-pg.headlessName" . }}
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.componentLabels" (list . "database") | nindent 4 }}
+  {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+  selector:
+    {{- include "sothanav-ha-pg.componentSelectorLabels" (list . "database") | nindent 4 }}

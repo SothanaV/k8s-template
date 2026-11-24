@@ -1,0 +1,40 @@
+{{/*
+The client endpoint. `pgcat.<namespace>.svc:<pgcat.service.port>` is stable regardless of
+pooler replicas or which node is currently the primary — that indirection is the point of
+this chart: clients never learn a pod name, and a failover moves the write target inside
+pgcat's config instead of moving a Kubernetes Service selector.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sothanav-ha-pg.pgcatName" . }}
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.componentLabels" (list . "pgcat") | nindent 4 }}
+  {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations .Values.pgcat.service.annotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.pgcat.service.type }}
+  ports:
+    - name: pgcat
+      port: {{ .Values.pgcat.service.port }}
+      # -- Always 6432: `[general] port` in the pgcat template. `service.port` only
+      # renames the Service side of the hop
+      targetPort: pgcat
+      protocol: TCP
+      {{- if and (eq .Values.pgcat.service.type "NodePort") .Values.pgcat.service.nodePort }}
+      nodePort: {{ .Values.pgcat.service.nodePort }}
+      {{- end }}
+    - name: metrics
+      port: {{ .Values.pgcat.service.metricsPort }}
+      targetPort: metrics
+      protocol: TCP
+  selector:
+    {{- include "sothanav-ha-pg.componentSelectorLabels" (list . "pgcat") | nindent 4 }}
+  {{- /*
+  InternalTrafficPolicy stays at the cluster default (Cluster): the poolers are stateless
+  and any of them can serve any client, so node-local routing would only strand clients on
+  nodes without a pooler pod.
+  */}}

@@ -1,0 +1,26 @@
+apiVersion: v2
+name: sothanav-ha-pg
+description: PostgreSQL 18 HA — 3 repmgr nodes with automatic failover plus a pgcat read/write pooler whose config follows the current primary through the Kubernetes API (no shared volume)
+type: application
+# Version of this Chart.yaml, not of PostgreSQL. Bump on every chart edit so
+# `helm history <release>` and `--set image.*` overrides stay traceable.
+version: 0.1.0
+# PostgreSQL major this chart targets. Must equal the major in `image.tag` (the
+# image is built from `image/Dockerfile` on `postgres:18-bookworm`) and matches the
+# `postgresql-18-repmgr` package and `/usr/lib/postgresql/18/bin` in `repmgr.pgBindir`.
+appVersion: "18"
+keywords:
+  - postgresql
+  - postgres
+  - repmgr
+  - pgcat
+  - high-availability
+  - failover
+  - pooler
+home: https://hub.docker.com/_/postgres
+sources:
+  - https://github.com/docker-library/postgres
+  - https://github.com/repmgr/repmgr
+  - https://github.com/postgresml/pgcat
+maintainers:
+  - name: sothana

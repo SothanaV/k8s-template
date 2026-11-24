@@ -1,0 +1,79 @@
+#!/bin/sh
+# ---------------------------------------------------------------------------
+# as-postgres — run one command as the PostgreSQL OS user (uid/gid 999).
+#
+# This is what every `gosu postgres ...` used to be, and why it is not gosu is specific
+# enough to be worth writing down: gosu 1.20 (the version the upstream `postgres` image
+# ships, a Go 1.24 binary) hangs at 100% CPU **inside the kernel** as soon as it fork+execs
+# a command on Linux 7.0 (Ubuntu 26.04.1 with k3s v1.36.5 / containerd 2.3.4, measured
+# 2026-11-24). The process sits in state R, `kill -9` does not reap it, and
+# `gosu --version` still returns instantly — so a chart that uses gosu looks like a database
+# whose `initdb` never finishes rather than like a broken step-down. On that node
+# `gosu postgres id` never returned; `setpriv --reuid=999 --regid=999 --init-groups id`
+# returned immediately.
+#
+# setpriv (util-linux, already in the base image) makes the same three syscalls —
+# setgroups/setgid/setuid — and then execvp in the SAME process, which is also better here:
+# the target command replaces this one, so its exit status reaches `set -e` and signals
+# reach it without a forwarding parent in between.
+#
+# HOME is set because `initdb`-time behaviour, psql's history file and a `~/.pgpass` used
+# without PGPASSFILE all depend on it. Everything else about the environment passes through
+# unchanged, which the entrypoint's PGPASSFILE/PGPASSWORD contract depends on. Supplementary
+# groups come from initgroups, so the result matches gosu: postgres, ssl-cert.
+#
+# Also installed as /usr/local/bin/gosu (see Dockerfile), so the usual
+#   kubectl -n <ns> exec pg-ha-0 -- gosu postgres repmgr -f /etc/repmgr/repmgr.conf cluster show
+# keeps working on kernels where the real gosu does not. Both spellings take either a bare
+# command or gosu's `user[:group] command` form.
+# ---------------------------------------------------------------------------
+set -eu
+
+PG_UID="${PG_UID:-999}"
+PG_GID="${PG_GID:-999}"
+PG_HOME="${PG_HOME:-/var/lib/postgresql}"
+
+# gosu's own informational flags, so `gosu --version` in a runbook or an image audit does
+# not fall through into the step-down and produce a setpriv parse error.
+case "${1:-}" in
+  --version|-V) echo "as-postgres (replaces gosu in this image) — step-down via $(setpriv --version 2>/dev/null || echo setpriv)"; exit 0 ;;
+  --help|-h)
+    echo "usage: as-postgres [user[:group]] command [args...]"
+    echo "       Runs command as postgres/999 (or the given account) using setpriv."
+    echo "       Flags gosu has but this does not: --preserve-environment, --init-groups,"
+    echo "       --login (HOME is always the target user's, groups are always initgroups)."
+    exit 0 ;;
+esac
+
+# gosu's `user` / `user:group` first argument, resolved exactly the way gosu resolves it:
+# the first argument IS the user whenever it names an account. That matters more than it
+# sounds — `postgres` is also a binary in this image's PATH, so "is it a command?" would
+# turn `gosu postgres id` into "start the postmaster with argument id". An unresolvable
+# first argument is simply the command to run, as postgres/postgres. Only a numeric uid or a
+# real account name counts: `id -u --version` answers with coreutils' version string, which
+# is not a uid.
+if [ "$#" -gt 0 ] && [ "${1#-}" = "$1" ]; then
+  _user="${1%%:*}"
+  _grp="${1#*:}"
+  _u="$(id -u "${_user}" 2>/dev/null || true)"
+  case "${_u}" in ''|*[!0-9]*) _u="" ;; esac        # POSIX: only digits count as a uid
+  if [ -n "${_u}" ]; then
+    PG_UID="${_u}"
+    if [ "${_grp}" != "${_user}" ] && [ -n "${_grp}" ]; then
+      PG_GID="$(id -g "${_grp}" 2>/dev/null)" || { echo "as-postgres: no such group: ${_grp}" >&2; exit 1; }
+    fi
+    _h="$(getent passwd "${_user}" 2>/dev/null | cut -d: -f6)"
+    [ -n "${_h}" ] && PG_HOME="${_h}"
+    shift
+  fi
+fi
+
+[ "$#" -gt 0 ] || set -- /bin/bash
+
+# Already unprivileged (a pod with securityContext.runAsUser: 999, or repmgr running
+# promote_command as postgres): nothing to drop, and setpriv would fail with EPERM.
+if [ "$(id -u)" != 0 ]; then
+  exec "$@"
+fi
+
+exec setpriv --reuid="${PG_UID}" --regid="${PG_GID}" --init-groups env HOME="${PG_HOME}" "$@"

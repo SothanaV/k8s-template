@@ -1,0 +1,421 @@
+# Values for the PostgreSQL 18 HA chart in this directory (repmgr + pgcat).
+#
+# Images:
+#   database  sothanav/pg-ha:18-repmgr — public on Docker Hub, built from `image/` in this
+#             directory (postgres:18-bookworm + postgresql-18-repmgr + as-postgres + the three
+#             scripts). Build your own if you must audit it or air-gap the registry.
+#   pooler    ghcr.io/postgresml/pgcat — upstream, unmodified
+#
+# One placeholder, rejected at render time until you set it. Keep real values in
+# values.local.yaml (matches the repo gitignore, never committed):
+#   <STORAGE_CLASS>   e.g. hpe-rwo / longhorn / csi-s3-block
+#
+# Passwords never appear in a values file: they live in the pre-created Secret named by
+# `auth.existingSecret` (README "Credentials").
+
+# -- Chart name used in object names. Empty = `sothanav-ha-pg` from Chart.yaml
+nameOverride: ""
+# -- Overrides the `<release>-<chart>` prefix. Pinned so node hostnames are stable
+# whatever the release name is: `<fullname>-0.<fullname>-headless.<namespace>.svc`
+fullnameOverride: "pg-ha"
+
+# -- Namespace baked into pod hostnames. Leave empty to use the release namespace.
+# Set it only when the pods really run there: repmgr registers these addresses in the
+# cluster metadata, so a wrong value survives every later restart as an unreachable node
+namespaceOverride: ""
+# -- Cluster DNS suffix (`<namespace>.svc.<this>`) inside those hostnames
+clusterDomain: "cluster.local"
+
+# -- Labels merged into every rendered object
+commonLabels: {}
+# -- Annotations merged into every rendered object
+commonAnnotations: {}
+
+image:
+  # -- Prefix for the image reference. Leave EMPTY when `repository` already includes the
+  # registry host, which is the usual case for a built image (`registry.local:5000/pg-ha`).
+  # Set it only for a bare path that needs a host, e.g. registry: ghcr.io +
+  # repository: myorg/pg-ha
+  registry: ""
+  # -- Public image, built from `image/` in this chart and published to Docker Hub, so a
+  # plain `helm install` works with nothing to build first. Replace it with your own
+  # registry path when you need to audit the layers, mirror it, or air-gap the nodes: the
+  # tag has to keep the PostgreSQL major, because `repmgr.pgBindir` and the base image must
+  # agree (the render refuses a mismatch). Pin `image.digest` once you have verified a build
+  repository: "sothanav/pg-ha"
+  # -- Tag of the image above. Keep the PostgreSQL major in step with `appVersion` and
+  # `repmgr.pgBindir`
+  tag: "18-repmgr"
+  # -- Optional `sha256:` digest. When set it replaces the tag in the image reference
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# -- ImagePullSecrets names, needed for a private registry, e.g. `[harborSecret]`
+imagePullSecrets: []
+
+# -- repmgr cluster size: one StatefulSet pod per node, ordinal 0 bootstraps as the
+# initial primary. 3 is the minimum worth running with `repmgr.failover: automatic` —
+# with 2 nodes both can believe they survived a partition. Renders are rejected below 3
+# while automatic failover is on
+replicas: 3
+
+# -- Seconds between SIGTERM (the entrypoint's `pg_ctl -m fast` shutdown) and SIGKILL.
+# A promoted node has WAL to flush and standbys to notify, so give it more than the
+# compose file's 30s stop_grace_period
+terminationGracePeriodSeconds: 60
+
+auth:
+  # -- Bootstrap superuser (initdb `--username`), and the user pgcat connects as
+  username: postgres
+  # -- Database created on first boot; also the database pgcat pools. `repmgr` runs
+  # replication and monitoring against `repmgrDatabase` instead
+  database: postgres
+  # -- Replication/monitoring role repmgr creates and logs in as
+  repmgrUser: repmgr
+  # -- Database holding repmgr's own metadata (registrations, heartbeats, failover history)
+  repmgrDatabase: repmgr
+
+  # -- Pre-created Secret with the three keys below. The chart never renders a
+  # credential: each pod reads only the keys it needs through `secretKeyRef`. Create it
+  # before installing (README "Credentials"):
+  #
+  #   kubectl -n <namespace> create secret generic pg-ha-secret \
+  #     --from-literal=postgres-password=... \
+  #     --from-literal=repmgr-password=... \
+  #     --from-literal=pgcat-admin-password=...
+  existingSecret: pg-ha-secret
+  postgresPasswordKey: postgres-password
+  repmgrPasswordKey: repmgr-password
+  pgcatAdminPasswordKey: pgcat-admin-password
+
+bootstrap:
+  # -- Ordinal that runs `initdb` and registers as the initial primary on a cold volume.
+  # With 0 the StatefulSet keeps `podManagementPolicy: OrderedReady`: pod 0 is Ready before
+  # pod 1 exists, which is what lets the standbys `standby clone` from it. Any other value
+  # switches the policy to `Parallel` — under OrderedReady, pod 0 would wait forever for a
+  # primary Kubernetes would never create, and the install would hang with no error.
+  # After the first failover this value only records intent: the live primary is whatever
+  # repmgr says it is
+  primaryOrdinal: 0
+
+repmgr:
+  # -- `automatic` lets repmgrd promote a standby when the primary disappears. The
+  # split-brain guard still applies: a node holding `standby.signal` that never sees any
+  # primary comes up monitoring-only (`failover=manual`) instead of promoting itself,
+  # because it cannot tell "the whole stack is restarting" from "the primary is gone".
+  # Set `manual` on storage that can lag (S3-backed volumes) to keep promotion explicit
+  failover: automatic
+  # -- Where the PostgreSQL binaries live in the image. Must match the major version of
+  # the `postgresql-<major>-repmgr` package in `image/Dockerfile`
+  pgBindir: /usr/lib/postgresql/18/bin
+  # -- repmgr.conf `reconnect_attempts` before repmgrd calls the upstream dead
+  reconnectAttempts: 4
+  # -- Seconds between those attempts. `reconnectAttempts x reconnectInterval` is the
+  # failover detection window, so raise both to make the cluster tolerant of a node that
+  # stalls on fsync instead of promoting over it
+  reconnectInterval: 3
+  # -- `use_replication_slots`: a slot keeps WAL a lagging standby still needs from the
+  # primary. Costs disk (the primary cannot recycle those segments) and prevents a
+  # rejoining standby from needing a full `pg_rewind`/reclone
+  useReplicationSlots: true
+  # -- `monitoring_history`: keep ping samples in `repmgr.monitoring_history` so
+  # "why did it fail over" is answerable afterwards
+  monitoringHistory: true
+  # -- Seconds a standby waits for a visible primary before starting repmgrd. Covers the
+  # window where pod 0 is still running `initdb`; see the split-brain guard above
+  primaryWaitSeconds: 60
+  # -- Seconds between pgcat config sync rounds on the primary. repmgr's `promote_command`
+  # syncs immediately, so this loop only repairs drift (a lost PATCH, a `helm upgrade`
+  # that reset the ConfigMap key)
+  pgcatSyncSeconds: 5
+  # -- Extra `repmgr.conf` lines, verbatim `key: value`. Written to
+  # `/templates/repmgr-extra.conf`, appended after the chart-managed keys. The entrypoint
+  # reads it once per pod, so editing it restarts the pods (the chart adds a checksum
+  # annotation for that). Keys the chart owns — `node_id`, `node_name`, `conninfo`,
+  # `data_directory`, `pg_bindir`, `failover`, `promote_command`, `follow_command` — are
+  # rejected at render time
+  settings: {}
+  #   child_wait_time: 60
+  #   log_level_console: notice
+
+# -- Server settings appended to `$PGDATA/postgresql.conf` **on first init only** (empty
+# volume). Later edits change nothing on a running cluster: apply them with
+# `ALTER SYSTEM` + `SELECT pg_reload_conf()`, or rebuild the volume. `listen_addresses`
+# and `shared_preload_libraries` are chart-managed and rejected here — the first must be
+# `*` for pod-to-pod replication, the second must load `repmgr`
+postgresqlConfig:
+  max_connections: "200"
+  shared_buffers: 256MB
+  work_mem: 4MB
+  # -- repmgrd's pings ride on a replication connection
+  max_wal_senders: 10
+  max_replication_slots: 10
+  # -- Refuse to let a standby fall this far behind instead of filling the disk; past it
+  # the standby needs a reclone. PG 18 name for the old `wal_keep_segments` idea
+  max_slot_wal_keep_size: 10GB
+  # -- Required for `pg_rewind`, which `repmgr node rejoin --force-rewind` runs on a
+  # node that was promoted and then demoted
+  wal_log_hints: "on"
+  hot_standby: "on"
+  timezone: UTC
+
+persistence:
+  # -- false gives an ephemeral cluster: every pod starts from an empty volume and
+  # re-bootstraps on restart. Dev only
+  enabled: true
+  # -- Volume and claim-template name (`<name>-<fullname>-<ordinal>` per node)
+  name: pgdata
+  # -- "" uses the cluster default StorageClass. A placeholder value fails the render.
+  # ReadWriteOnce classes only: one volume per pod, no sharing
+  storageClass: "<STORAGE_CLASS>"
+  accessMode: ReadWriteOnce
+  size: 20Gi
+  # -- Bind one existing PVC to every pod. That is wrong for more than one replica (all
+  # nodes would open the same data directory), so the render fails unless replicas is 1
+  existingClaim: ""
+  # -- `Retain` keeps the three volumes through `helm uninstall`; `Delete` removes them
+  # with the StatefulSet
+  reclaimPolicy: Retain
+  # -- Match labels of pre-provisioned PVs
+  selector: {}
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 500m
+    memory: 1Gi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+# -- Probes run `pg_isready` against 127.0.0.1 inside the pod. Note what each one means
+# here: Ready says "this node answers queries", which is true for a streaming standby
+# too. pgcat does not use Kubernetes readiness at all — it re-reads its own config — so
+# these probes exist for rollouts and `kubectl get pods`, not for routing
+probes:
+  startup:
+    enabled: true
+    periodSeconds: 5
+    # -- Covers `initdb` on a cold volume AND `standby clone` of an existing one: 5s x
+    # 360 = 30 min. Raise it for a large database, otherwise kubelet kills a clone that
+    # is merely slow and the standby retries from scratch
+    failureThreshold: 360
+    timeoutSeconds: 5
+  readiness:
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  liveness:
+    # -- Keep this window generous. Crash recovery after an unclean shutdown can outlast
+    # a tight probe, and restarting a pod mid-recovery just restarts the recovery
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    timeoutSeconds: 5
+    # -- 30s x 10 = 5 min of no answer before the pod is restarted
+    failureThreshold: 10
+
+# -- Prefer spreading the nodes over different nodes. `required` needs at least
+# `replicas` schedulable nodes and makes a node drain fail outright, so it is opt-in
+podAntiAffinity:
+  enabled: true
+  # -- `hard` renders `requiredDuringSchedulingIgnoredDuringExecution`
+  required: false
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+# -- Full `affinity` block. Set it instead of `podAntiAffinity` when you need more than
+# the hostname spread (the two render into the same field, this one wins)
+affinity: {}
+
+# -- Extra plain `env` entries on the database container. Keep secrets out: use
+# `secretKeyRef` in `extraEnvVars` for anything sensitive
+extraEnv: []
+extraEnvVars: []
+
+# -- UID/GID 999 is `postgres` in `postgres:18-bookworm`. The entrypoint starts as root and
+# steps down with as-postgres (setpriv), which is why `runAsNonRoot` must stay false: with it
+# true, kubelet refuses to start the pod and the cluster never forms
+podSecurityContext:
+  enabled: true
+  # -- Makes a freshly provisioned volume group-writable before the entrypoint chowns it
+  fsGroup: 999
+  runAsUser: 0
+  runAsGroup: 0
+  runAsNonRoot: false
+  seccompProfile:
+    type: RuntimeDefault
+  # -- Leave this out to inherit the node's default AppArmor profile, which is right on most
+  # clusters. Set `type: Unconfined` where containerd applies its generated
+  # `cri-containerd.apparmor.d` (the containerd 2.x default): that profile grants no `signal`
+  # permission, so AppArmor refuses the kill() PostgreSQL uses to wake its own io workers and
+  # backends — the server starts, prints "ready to accept connections", and then every
+  # connection hangs with nothing in the log. README: AppArmor
+  # appArmorProfile:
+  #   type: Unconfined
+
+containerSecurityContext:
+  enabled: true
+  # -- the entrypoint's step-down from root to uid 999 is a privilege transition, so this
+  # cannot be false while the database container uses the chart entrypoint
+  allowPrivilegeEscalation: true
+  capabilities:
+    drop:
+      - ALL
+    # -- What the root phase of the entrypoint actually needs: chown/chmod the volume
+    # (CHOWN, FOWNER, DAC_OVERRIDE), step down to uid 999 (SETUID, SETGID), and signal
+    # the postmaster during shutdown (KILL). No CAP_SYS_ADMIN, no privileged mode
+    add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - FOWNER
+      - DAC_OVERRIDE
+      - KILL
+  readOnlyRootFilesystem: false
+
+serviceAccount:
+  # -- The scripts call the API: the database nodes PATCH the pgcat ConfigMap, the pgcat
+  # sidecar GETs it. false means you provide your own `name` with those rights
+  create: true
+  name: ""
+  annotations: {}
+  # -- Both long-running scripts re-read the token file every round, so kubelet's
+  # bounded-token rotation is transparent to them and no projection override is needed
+
+rbac:
+  # -- Roles for both identities: the database pods get `get`+`patch` on the one published
+  # ConfigMap, the pgcat pod gets `get` only. Nothing else, anywhere
+  create: true
+
+pgcat:
+  # -- Pooler object names, pinned so clients always use `pgcat.<namespace>.svc:<port>`.
+  # Empty falls back to `<fullname>-pgcat`
+  fullnameOverride: "pgcat"
+
+  serviceAccount:
+    # -- The pooler has its OWN identity, bound to `get` on the published ConfigMap and
+    # nothing else. Sharing the database ServiceAccount would give the pod that may be
+    # exposed outside the cluster a write on the file the sidecar puts the real database
+    # password into (README: RBAC)
+    create: true
+    name: ""
+    annotations: {}
+  image:
+    registry: ghcr.io
+    repository: postgresml/pgcat
+    # -- pgcat publishes no semver tags on ghcr.io, only `latest`/`main`/per-commit SHA
+    # tags. Pin `digest` below for a reproducible rollout
+    tag: latest
+    # -- Resolve the current digest of the tag you want and put it here; it replaces the
+    # tag in the rendered reference:
+    #   skopeo inspect docker://ghcr.io/postgresml/pgcat:latest | jq -r .Digest
+    # `sha256:627761f6dcbc8c0d17809445d7441518e2452c6d4fbdcc2a9986871d9e3e1176` was
+    # `latest` on 2026-11-24
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  # -- Poolers are stateless: each holds its own connection pools, so N replicas means
+  # N x `poolSize` backend connections (checked against `max_connections` at render time)
+  replicas: 1
+
+  # -- Seconds between ConfigMap polls in the pgcat sidecar. pgcat's own `autoreload`
+  # timer (3s in the shipped template) is the backstop; the sidecar also sends RELOAD
+  # right after it writes a changed file
+  watchIntervalSeconds: 3
+
+  # -- pgcat's local admin console account. NOT a PostgreSQL role: it must not collide
+  # with a username in the pool config, or normal client sessions land on the admin page.
+  # Its password comes from `auth.pgcatAdminPasswordKey`. It reaches pgcat through the
+  # `__ADMIN_USER__` token, filled by the same sidecar that authenticates the RELOAD with
+  # it, so renaming it here cannot leave pgcat and the sidecar disagreeing
+  adminUser: pgcat_admin
+  # -- Database for admin sessions. pgcat only opens an admin connection when the
+  # database has no pool configured, so this must NOT be `auth.database`
+  adminDatabase: pgcat
+
+  # -- `pool_size` in the rendered config (the template's `__POOL_SIZE__` token), per pooler
+  # replica. Kept here as well as in the template so the render can check it against
+  # `max_connections`
+  poolSize: 30
+
+  # -- Port the pooled PostgreSQL servers listen on. The sidecar's `RELOAD` target is
+  # pgcat's own 6432, which `[general] port` fixes in the template and is therefore not a
+  # value here
+  serverPort: 5432
+
+  service:
+    # -- `ClusterIP` for in-cluster clients. `NodePort`/`LoadBalancer` only when a client
+    # genuinely sits outside the cluster
+    type: ClusterIP
+    # -- Client endpoint (the psql/pgcat port; PostgreSQL itself stays on 5432)
+    port: 6432
+    # -- Fixed port when `type: NodePort` (default kubelet range 30000-32767)
+    nodePort: null
+    # -- pgcat's Prometheus exporter port, published on the same Service
+    metricsPort: 9930
+    annotations: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  podSecurityContext:
+    enabled: true
+    # -- Group-writable emptyDir the sidecar writes and pgcat reads
+    fsGroup: 999
+  containerSecurityContext:
+    enabled: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  sidecarSecurityContext:
+    enabled: true
+    # -- The sidecar is plain bash + curl + psql, so it runs unprivileged as uid 999
+    runAsUser: 999
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+
+  # -- Replacement for `files/pgcat.toml.tpl`. Empty uses the file. Set it to a full TOML
+  # config to change pool_mode, timeouts, or the query parser without editing the chart;
+  # `--set-file pgcat.configTemplate=./my-pgcat.toml` works too. The tokens the scripts
+  # fill in are documented at the top of `files/pgcat.toml.tpl`
+  configTemplate: ""
+
+metrics:
+  # -- Renders the ServiceMonitor and PrometheusRule below. Both need the
+  # monitoring.coreos.com CRDs (kube-prometheus-stack); off by default so the chart
+  # installs on a cluster without them
+  enabled: false
+
+  serviceMonitor:
+    # -- Scrapes pgcat's exporter (`/metrics` on the `metrics` port). Only meaningful
+    # with `metrics.enabled` true
+    enabled: true
+    # -- Extra labels for a ServiceMonitorSelector in the Prometheus CR
+    labels: {}
+    interval: 30s
+    scrapeTimeout: 10s
+
+  prometheusRule:
+    # -- Node-count, pooler-up and PVC-Pending alerts built from kube-state-metrics and
+    # the exporter's `up` series. The pool-metric rules are left commented in the file:
+    # pgcat's series names move between builds, so verify them against `/metrics` first
+    enabled: true
+    labels: {}
+    # -- Appended verbatim to the rule list
+    additionalRules: []

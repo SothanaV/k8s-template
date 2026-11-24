@@ -1,0 +1,112 @@
+{{- if and .Values.metrics.enabled .Values.metrics.prometheusRule.enabled }}
+{{/*
+Alerts built only from series that exist in this setup: kube-state-metrics (pod counts,
+PVC phase) and the `up` series for pgcat's exporter. Nothing here guesses at pgcat's pool
+metric names — they move between builds, and an alert on a series that does not exist is
+silent in exactly the way a database alert must not be. Extend from /metrics once you have
+looked at it; examples are commented at the end.
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "sothanav-ha-pg.fullname" . }}
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: pg-ha.availability
+      rules:
+        - alert: PgHaDatabasePodsNotReady
+          # -- Fewer Ready pods than `replicas`. A missing standby is a redundancy
+          # problem; the initial primary missing is a write-path problem, which is why this
+          # is one critical alert rather than two warning ones. Readiness here means
+          # "pg_isready answers", so a pod stuck in `standby clone` or crash recovery also
+          # trips it.
+          expr: |
+            kube_statefulset_status_replicas_ready{namespace="{{ include "sothanav-ha-pg.namespace" . }}", statefulset="{{ include "sothanav-ha-pg.fullname" . }}"} < {{ int .Values.replicas }}
+          for: 5m
+          labels:
+            severity: critical
+            service: {{ include "sothanav-ha-pg.fullname" . }}
+          annotations:
+            summary: Fewer than {{ int .Values.replicas }} PostgreSQL HA pods are Ready
+            description: >-
+              StatefulSet {{ include "sothanav-ha-pg.fullname" . }} in namespace
+              {{ include "sothanav-ha-pg.namespace" . }} has fewer Ready pods than
+              replicas. Check pod order first: a pod below the highest ordinal may be
+              blocked waiting for an earlier one, which is OrderedReady doing its job.
+              Then read the node log, which carries repmgrd and the server log together:
+              kubectl -n {{ include "sothanav-ha-pg.namespace" . }} logs <pod>. With
+              repmgr.failover=automatic, a demoted node comes back through
+              "repmgr node rejoin --force-rewind" and this alert clears by itself.
+
+        - alert: PgHaPoolerDown
+          # -- Every client path goes through pgcat: the cluster can be perfectly healthy
+          # with nobody able to reach it. `endpoint="metrics"` pins this to the exporter
+          # port rather than any other port the Service may gain later.
+          expr: |
+            up{namespace="{{ include "sothanav-ha-pg.namespace" . }}", service="{{ include "sothanav-ha-pg.pgcatName" . }}", endpoint="metrics"} == 0
+          for: 3m
+          labels:
+            severity: critical
+            service: {{ include "sothanav-ha-pg.fullname" . }}
+          annotations:
+            summary: pgcat exporter is not being scraped
+            description: >-
+              No scrape target for the pgcat Service in
+              {{ include "sothanav-ha-pg.namespace" . }} for 3 minutes. A pooler that stays
+              up but has no config never appears here — check the sidecar log for
+              "no config published yet", and
+              kubectl -n {{ include "sothanav-ha-pg.namespace" . }} get cm {{ include "sothanav-ha-pg.publishedName" . }} -o jsonpath='{.metadata.annotations}'
+              for which primary the cluster last published.
+
+        - alert: PgHaDataVolumePending
+          # -- A Pending PVC on a database pod is not a slow provisioner, it is a stalled
+          # node: the pod cannot start, so the cluster has lost a node. Usually a
+          # StorageClass typo, a quota, or a volume bound in another zone.
+          expr: |
+            kube_persistentvolumeclaim_status_phase{namespace="{{ include "sothanav-ha-pg.namespace" . }}", phase="Pending", persistentvolumeclaim=~"{{ .Values.persistence.name }}-{{ include "sothanav-ha-pg.fullname" . }}-.*"} == 1
+          for: 5m
+          labels:
+            severity: warning
+            service: {{ include "sothanav-ha-pg.fullname" . }}
+          annotations:
+            summary: A PostgreSQL HA data volume is stuck in Pending
+            description: >-
+              A claim named {{ .Values.persistence.name }}-{{ include "sothanav-ha-pg.fullname" . }}-<ordinal>
+              has been Pending for 5 minutes. kubectl -n {{ include "sothanav-ha-pg.namespace" . }}
+              describe pvc gives the reason in its events.
+
+    {{- with .Values.metrics.prometheusRule.additionalRules }}
+    - name: pg-ha.pooler
+      rules:
+        {{- toYaml . | nindent 8 }}
+    {{- end }}
+    {{- /*
+        Pool-level rules belong here, once verified against the exporter. pgcat's series
+        names differ between builds, so confirm first:
+
+          kubectl -n <ns> exec deploy/pgcat -c pgcat -- sh -c 'wget -qO- 127.0.0.1:9930/metrics' | grep '^pgcat'
+
+        Then, for example (names as of the postgresml/pgcat `latest` build; adjust):
+
+        - alert: PgHaPoolExhausted
+          expr: |
+            sum by (pool) (pgcat_pools_pool_size{namespace="<ns>"})
+              / on(pool) sum by (pool) (pgcat_pools_max_connections{namespace="<ns>"}) > 0.9
+          for: 5m
+          labels: {severity: warning}
+          annotations: {summary: "pgcat pools above 90% of pool_size"}
+
+        - alert: PgHaBannedServers
+          expr: |
+            max_over_time(pgcat_databases_active_connections{namespace="<ns>"}[5m]) == 0
+          for: 2m
+          labels: {severity: critical}
+          annotations: {summary: "pgcat has no usable server in the pool"}
+        */}}
+{{- end }}

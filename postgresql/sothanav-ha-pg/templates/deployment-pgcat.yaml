@@ -1,0 +1,199 @@
+{{/*
+pgcat: the only endpoint clients should use. Two containers share one emptyDir:
+
+  pgcat           upstream image, reads /config/pgcat.toml, autoreloads it every 3s
+  config-watcher  chart image, GETs the published ConfigMap every watchIntervalSeconds,
+                  fills in the password tokens, writes the file, sends RELOAD
+
+The split is what replaces the compose stack's shared named volume, and it is why no
+ReadWriteMany StorageClass is involved: the database nodes never touch this pod's
+filesystem, they PATCH a ConfigMap that the sidecar polls.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sothanav-ha-pg.pgcatName" . }}
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.componentLabels" (list . "pgcat") | nindent 4 }}
+  {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.pgcat.replicas }}
+  {{- /*
+  maxUnavailable 0: a new pod is Ready before the old one goes, so a config or image
+  change never opens a gap in the only client endpoint. (Each replica holds its own
+  pools, so a brief overlap costs backend connections, not correctness.)
+  */}}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "sothanav-ha-pg.componentSelectorLabels" (list . "pgcat") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sothanav-ha-pg.componentLabels" (list . "pgcat") | nindent 8 }}
+      {{- /*
+      No checksum annotation for the templates here on purpose. `pgcat.configTemplate`
+      changes flow through the ConfigMap and the sidecar re-renders within one poll, and a
+      template that breaks pgcat is better applied by reload (old pools stay up, the error
+      is in the logs) than by a rollout that drops every client connection.
+      */}}
+      {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations .Values.pgcat.podAnnotations)) }}
+      annotations:
+        {{- . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- /*
+      The pooler has its own ServiceAccount with `get` only (rbac.yaml): it must not be able
+      to write the ConfigMap the sidecar substitutes the real database password into.
+      */}}
+      automountServiceAccountToken: true
+      serviceAccountName: {{ include "sothanav-ha-pg.pgcatServiceAccountName" . }}
+      # -- Same reason as in the database pods: keeps unrelated `_SERVICE_PORT` variables
+      # out of the sidecar's environment; it defaults to kubernetes.default.svc:443.
+      enableServiceLinks: false
+      {{- if .Values.pgcat.podSecurityContext.enabled }}
+      securityContext:
+        {{- toYaml (omit .Values.pgcat.podSecurityContext "enabled") | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: pgcat
+          image: {{ include "sothanav-ha-pg.pgcatImage" . | quote }}
+          imagePullPolicy: {{ .Values.pgcat.image.pullPolicy }}
+          # -- pgcat exits on a missing or unparsable config, and on a fresh install the
+          # ConfigMap is empty until the primary node publishes. Waiting here is correct
+          # behaviour, not a crash loop: no config means no server list, and a pooler with
+          # a wrong server list is worse than one that is not up yet.
+          command: ["sh", "-c"]
+          args:
+            - |
+              until [ -s /config/pgcat.toml ]; do
+                echo "waiting for /config/pgcat.toml (published by pgcat-role-sync.sh on the primary)"
+                sleep 1
+              done
+              exec pgcat /config/pgcat.toml
+          ports:
+            - name: pgcat
+              containerPort: 6432
+              protocol: TCP
+            - name: metrics
+              # -- Fixed at 9930 because `prometheus_exporter_port` in the template is
+              # fixed. `pgcat.service.metricsPort` only renames the Service side.
+              containerPort: 9930
+              protocol: TCP
+          {{- /*
+          TCP only: the pgcat image has no psql and no shell tools worth probing with, and
+          "the listener is up" is the honest signal. Deeper health lives in the metrics
+          (pgcat's exporter) and in the alerts, not in a probe that would have to open a
+          pooled connection and burn pool slots.
+          */}}
+          readinessProbe:
+            tcpSocket:
+              port: pgcat
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: pgcat
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            {{- toYaml .Values.pgcat.resources | nindent 12 }}
+          {{- if .Values.pgcat.containerSecurityContext.enabled }}
+          securityContext:
+            {{- toYaml (omit .Values.pgcat.containerSecurityContext "enabled") | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+
+        - name: config-watcher
+          image: {{ include "sothanav-ha-pg.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/pgcat-config-watch.sh"]
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PGCAT_CONFIGMAP
+              value: {{ include "sothanav-ha-pg.publishedName" . | quote }}
+            - name: PGCAT_OUT
+              value: "/config/pgcat.toml"
+            - name: PGCAT_WATCH_SECONDS
+              value: {{ .Values.pgcat.watchIntervalSeconds | quote }}
+            # -- pgcat's own listener, in this pod. 6432 is fixed by `[general] port` in
+            # the template, which is why this is not a value.
+            - name: PGCAT_HOST
+              value: "127.0.0.1"
+            - name: PGCAT_PORT
+              value: "6432"
+            - name: PGCAT_ADMIN_USER
+              value: {{ .Values.pgcat.adminUser | quote }}
+            - name: PGCAT_ADMIN_DB
+              value: {{ .Values.pgcat.adminDatabase | quote }}
+            - name: PGCAT_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "auth.existingSecret is required (README: Credentials)" .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.pgcatAdminPasswordKey }}
+            # -- Substituted into the pool user's password at write time. This is the only
+            # place the database password reaches the pooler, and the reason the published
+            # ConfigMap can stay credential-free.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.postgresPasswordKey }}
+          {{- /*
+          No probes: the sidecar is a curl/sleep loop whose only output is the file pgcat
+          reads, and `pgcat`'s own readiness already fails when that file is missing.
+          Its logs carry the diagnosis ("no config published yet", HTTP 403, ...).
+          */}}
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          {{- if .Values.pgcat.sidecarSecurityContext.enabled }}
+          securityContext:
+            {{- toYaml (omit .Values.pgcat.sidecarSecurityContext "enabled") | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+
+      volumes:
+        # -- Written by the sidecar, read by pgcat. An emptyDir, not a PVC and not a
+        # ConfigMap mount: kubelet's own ConfigMap sync interval is longer than the
+        # failover window this chart is built around.
+        - name: config
+          emptyDir: {}
+      {{- with .Values.pgcat.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pgcat.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.pgcat.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

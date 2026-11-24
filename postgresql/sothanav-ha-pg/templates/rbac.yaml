@@ -1,0 +1,91 @@
+{{/*
+Two identities, two policies.
+
+  publisher  (database pods)  get + patch on the one published ConfigMap
+  reader     (pgcat pod)      get  on the same ConfigMap, nothing else
+
+The split is deliberate. `patch` is needed only by pgcat-role-sync.sh, which runs in a
+database pod. If one ServiceAccount served both workloads, the pooler — which is the part
+of this chart that an operator may well expose as a NodePort — would hold a write on the
+file the sidecar substitutes the real database password into: compromise pgcat, rewrite the
+server list to an attacker host, and the sidecar hands over the credential with a valid
+pool connection. Read is the most the pooler has ever needed.
+
+`resourceNames` pins both rules to the one ConfigMap pgcat reads, so neither pod can read
+ConfigMaps holding anything else in the namespace. No `list`, no `watch`, no `create`: the
+scripts poll deliberately, because a watch would need permission over the collection rather
+than over one named object.
+
+If you rename `pgcat.fullnameOverride` or `publishedName`, both Roles follow in the same
+render; a hand-edited Role pointing at the old name shows up as HTTP 403 in the
+config-watcher logs and a frozen pgcat config.
+*/}}
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sothanav-ha-pg.publishedName" . }}-publisher
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.labels" . | nindent 4 }}
+  {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - {{ include "sothanav-ha-pg.publishedName" . }}
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sothanav-ha-pg.publishedName" . }}-publisher
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sothanav-ha-pg.publishedName" . }}-publisher
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sothanav-ha-pg.serviceAccountName" . }}
+    namespace: {{ include "sothanav-ha-pg.namespace" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "sothanav-ha-pg.publishedName" . }}-reader
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.labels" . | nindent 4 }}
+  {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - {{ include "sothanav-ha-pg.publishedName" . }}
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "sothanav-ha-pg.publishedName" . }}-reader
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "sothanav-ha-pg.publishedName" . }}-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "sothanav-ha-pg.pgcatServiceAccountName" . }}
+    namespace: {{ include "sothanav-ha-pg.namespace" . }}
+{{- end }}

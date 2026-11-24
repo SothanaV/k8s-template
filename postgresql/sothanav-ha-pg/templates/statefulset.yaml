@@ -1,0 +1,338 @@
+{{- $_ := include "sothanav-ha-pg.validate" . }}
+{{- $secretName := required "auth.existingSecret is required (README: Credentials)" .Values.auth.existingSecret }}
+{{- $pgData := "/var/lib/postgresql/data/pgdata" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "sothanav-ha-pg.fullname" . }}
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.componentLabels" (list . "database") | nindent 4 }}
+  {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  replicas: {{ .Values.replicas }}
+  serviceName: {{ include "sothanav-ha-pg.headlessName" . }}
+  {{- /*
+  Boot order, spelled out because this chart depends on it. Pods are created one at a time
+  and the next waits for the previous to be Ready, which on a cold volume IS the bootstrap
+  order: the bootstrap ordinal runs initdb and registers as primary, becomes Ready, and only
+  then is the next ordinal created so its `standby clone` has something to clone from.
+
+  That works only while the bootstrap ordinal is also the first ordinal Kubernetes creates.
+  With `bootstrap.primaryOrdinal: 1`, pod 0 would block in its "waiting for the primary"
+  loop, never become Ready, and pod 1 would therefore never be created — an install that
+  hangs with no error. So a non-zero ordinal switches the policy to Parallel: every pod
+  starts at once, the designated one initialises, and the others wait in the same loop the
+  entrypoint already has, which is exactly what `Parallel` is for.
+  */}}
+  podManagementPolicy: {{ if eq (int .Values.bootstrap.primaryOrdinal) 0 }}OrderedReady{{ else }}Parallel{{ end }}
+  {{- /*
+  RollingUpdate walks ordinals downward (n-1 ... 0) and waits for Ready between them, so
+  with bootstrap.primaryOrdinal 0 the initial primary is restarted last: the cluster is
+  never without a node that was the primary up to the previous step. Set it to OnDelete if
+  you want to control the order yourself (a promoted primary may then be any ordinal).
+  */}}
+  updateStrategy:
+    type: RollingUpdate
+  {{- /*
+  Both fields set explicitly instead of relying on the cluster default: `whenDeleted`
+  decides whether `helm uninstall` takes three databases with it.
+  */}}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: {{ eq (.Values.persistence.reclaimPolicy | default "Retain") "Delete" | ternary "Delete" "Retain" }}
+    # -- Never on scale-down: 3 -> 2 -> 3 must return to the same three data directories
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      {{- include "sothanav-ha-pg.componentSelectorLabels" (list . "database") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sothanav-ha-pg.componentLabels" (list . "database") | nindent 8 }}
+      annotations:
+        # -- repmgr reads repmgr.conf and postgresql.conf once per start, so an edit to
+        # `repmgr.settings` or `postgresqlConfig` needs a restart to matter. Without this
+        # annotation `helm upgrade` would change the ConfigMap and roll nothing.
+        checksum/conf: {{ include (print $.Template.BasePath "/configmap-conf.yaml") . | sha256sum }}
+        {{- /*
+        NOT the live pgcat ConfigMap: it changes on every failover, and annotating it here
+        would restart the whole database cluster every time a primary moves.
+        */}}
+        {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations .Values.podAnnotations)) }}
+        {{- . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # -- The entrypoint and pgcat-role-sync.sh call the Kubernetes API: the script
+      # PATCHes the pgcat ConfigMap. kubelet mounts the token and CA at
+      # /var/run/secrets/kubernetes.io/serviceaccount, and both scripts re-read the token
+      # file every round so bounded-token rotation is invisible.
+      automountServiceAccountToken: true
+      serviceAccountName: {{ include "sothanav-ha-pg.serviceAccountName" . }}
+      # -- Keeps other workloads' `_<service>_PORT` variables out of the entrypoint's
+      # environment. The scripts still find the API because they default
+      # KUBERNETES_SERVICE_HOST/PORT to kubernetes.default.svc:443.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.podSecurityContext.enabled }}
+      securityContext:
+        {{- toYaml (omit .Values.podSecurityContext "enabled") | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: database
+          image: {{ include "sothanav-ha-pg.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          env:
+            # -- Node identity. entrypoint.sh derives node_id from the ordinal suffix of
+            # POD_NAME and rebuilds its own FQDN, so nothing here has to know the pod name
+            # at render time.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HEADLESS_SERVICE
+              value: {{ include "sothanav-ha-pg.headlessName" . | quote }}
+            - name: CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | quote }}
+            - name: BOOTSTRAP_PRIMARY_POD
+              value: {{ include "sothanav-ha-pg.bootstrapPrimaryPod" . | quote }}
+            # -- Membership must be spelled identically everywhere: repmgr stores these
+            # strings, `repmgr cluster show` prints them, and pgcat's server list is built
+            # from them. One source, this value.
+            - name: PARTNER_HOSTS
+              value: {{ include "sothanav-ha-pg.partnerHosts" . | quote }}
+            # -- Pinned to the volume mount below, not the image default. postgres:18
+            # exports PGDATA=/var/lib/postgresql/18/docker, which is in the container layer:
+            # honouring it would initialise and write a cluster that vanishes on every pod
+            # recreate. The entrypoint re-checks this and falls back to the mount path.
+            - name: PGDATA
+              value: {{ $pgData | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.auth.username | quote }}
+            - name: POSTGRES_DB
+              value: {{ .Values.auth.database | quote }}
+            - name: REPMGR_USER
+              value: {{ .Values.auth.repmgrUser | quote }}
+            - name: REPMGR_DB
+              value: {{ .Values.auth.repmgrDatabase | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.auth.postgresPasswordKey }}
+            - name: REPMGR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ .Values.auth.repmgrPasswordKey }}
+            # -- repmgr.conf, rendered by entrypoint.sh from these
+            - name: FAILOVER_MODE
+              value: {{ .Values.repmgr.failover | quote }}
+            - name: PG_BIN_DIR
+              value: {{ .Values.repmgr.pgBindir | quote }}
+            - name: RECONNECT_ATTEMPTS
+              value: {{ .Values.repmgr.reconnectAttempts | quote }}
+            - name: RECONNECT_INTERVAL
+              value: {{ .Values.repmgr.reconnectInterval | quote }}
+            - name: USE_REPLICATION_SLOTS
+              value: {{ .Values.repmgr.useReplicationSlots | ternary "yes" "no" | quote }}
+            - name: MONITORING_HISTORY
+              value: {{ .Values.repmgr.monitoringHistory | ternary "yes" "no" | quote }}
+            - name: PRIMARY_WAIT_SECONDS
+              value: {{ .Values.repmgr.primaryWaitSeconds | quote }}
+            - name: PGCAT_SYNC_SECONDS
+              value: {{ .Values.repmgr.pgcatSyncSeconds | quote }}
+            # -- What pgcat-role-sync.sh publishes and with which values. Note the absence
+            # of pgcat's admin password: the sync script leaves the password tokens in the
+            # text, and the pgcat pod substitutes them from its own Secret keys.
+            - name: PGCAT_CONFIGMAP
+              value: {{ include "sothanav-ha-pg.publishedName" . | quote }}
+            - name: TEMPLATE_DIR
+              value: "/templates"
+            - name: PGCAT_TEMPLATE
+              value: "/templates/pgcat.toml.tpl"
+            - name: PGCAT_DB
+              value: {{ .Values.auth.database | quote }}
+            - name: PGCAT_DB_USER
+              value: {{ .Values.auth.username | quote }}
+            - name: PGCAT_PG_PORT
+              value: {{ .Values.pgcat.serverPort | quote }}
+            - name: PGCAT_POOL_SIZE
+              value: {{ .Values.pgcat.poolSize | quote }}
+            {{- /*
+            Two budgets the entrypoint cannot choose for itself.
+
+            PGCTL_START_TIMEOUT: `pg_ctl -w` waits 60 s by default and then reports failure,
+            which under `set -e` ends PID 1 and tears down a postmaster that is still
+            replaying WAL normally. It gets the same budget the startup probe gets, so
+            whichever expires first is the one the operator configured.
+
+            PGCTL_STOP_TIMEOUT: `pg_ctl -m fast -w stop` has the same 60 s default. It must
+            stay inside terminationGracePeriodSeconds, or kubelet sends SIGKILL at the exact
+            moment the shutdown would have finished, and the next start does crash recovery.
+
+            PGPASSFILE: the entrypoint also exports it, but `kubectl exec` starts a fresh
+            shell from the container spec's environment, and every runbook command in
+            README.md (`repmgr cluster show`, `node check`, psql as the repmgr user) needs
+            the password file to be findable there.
+            */}}
+            - name: PGCTL_START_TIMEOUT
+              value: {{ mul (int .Values.probes.startup.failureThreshold) (int .Values.probes.startup.periodSeconds) | quote }}
+            - name: PGCTL_STOP_TIMEOUT
+              value: {{ max 30 (int (sub (int .Values.terminationGracePeriodSeconds) 10)) | quote }}
+            - name: PGPASSFILE
+              value: "/var/lib/postgresql/.pgpass"
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.extraEnvVars }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                {{- /*
+                TCP loopback, not the unix socket: the entrypoint starts the server with
+                pg_ctl, and a socket probe can report success against a postmaster that has
+                not finished accepting connections. `pg_isready` over TCP goes green only
+                once the real postmaster is listening and past recovery.
+                */}}
+                - exec pg_isready --host 127.0.0.1 --port 5432 --username "$POSTGRES_USER" --quiet
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+          {{- end }}
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                {{- /*
+                --dbname makes Ready mean "the pooled database answers", not merely that a
+                postmaster is up. No password: pg_isready counts an authentication complaint
+                as "accepting connections", which is what a readiness check wants.
+                A streaming standby is Ready too — that is intended. These probes drive
+                rollouts and `kubectl get pods`; pgcat routes by its own config, never by
+                Kubernetes readiness.
+                */}}
+                - exec pg_isready --host 127.0.0.1 --port 5432 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" --quiet
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready --host 127.0.0.1 --port 5432 --username "$POSTGRES_USER" --quiet
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.containerSecurityContext.enabled }}
+          securityContext:
+            {{- toYaml (omit .Values.containerSecurityContext "enabled") | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            # -- One volume per pod, mounted at the root of the cluster data. PGDATA is a
+            # subdirectory of it so the mount point itself stays a plain directory
+            # (initdb refuses to initialise into a non-empty dir, and the volume root
+            # carries lost+found on ext4).
+            - name: {{ .Values.persistence.name }}
+              mountPath: /var/lib/postgresql/data
+            # -- Chart inputs: pgcat.toml.tpl, postgresql-append.conf, repmgr-extra.conf.
+            # Read-only: kubelet refreshes the mounted files, and pgcat-role-sync.sh
+            # re-reads the template every round, so a template edit needs no restart.
+            - name: conf
+              mountPath: /templates
+              readOnly: true
+      volumes:
+        - name: conf
+          configMap:
+            name: {{ include "sothanav-ha-pg.confName" . }}
+            defaultMode: 0444
+        {{- if not .Values.persistence.enabled }}
+        # -- persistence disabled: every pod re-bootstraps from empty, and a failover
+        # promotes an empty standby. Dev only.
+        - name: {{ .Values.persistence.name }}
+          emptyDir: {}
+        {{- else if .Values.persistence.existingClaim }}
+        - name: {{ .Values.persistence.name }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      # -- Full control; `podAntiAffinity` below is ignored when this is set.
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if .Values.podAntiAffinity.enabled }}
+      affinity:
+        podAntiAffinity:
+          {{- if .Values.podAntiAffinity.required }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "sothanav-ha-pg.componentSelectorLabels" (list . "database") | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+          {{- else }}
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "sothanav-ha-pg.componentSelectorLabels" (list . "database") | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+          {{- end }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+  volumeClaimTemplates:
+    - metadata:
+        name: {{ .Values.persistence.name }}
+        labels:
+          {{- include "sothanav-ha-pg.componentSelectorLabels" (list . "database") | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          - {{ .Values.persistence.accessMode }}
+        {{- /* Omitted when empty so the cluster default StorageClass applies */}}
+        {{- with .Values.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+        {{- with .Values.persistence.selector }}
+        selector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
+  {{- end }}

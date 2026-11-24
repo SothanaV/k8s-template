@@ -1,0 +1,98 @@
+{{- $fullName := include "sothanav-ha-pg.fullname" . -}}
+{{- $ns := include "sothanav-ha-pg.namespace" . -}}
+{{- $pgcat := include "sothanav-ha-pg.pgcatName" . -}}
+{{- $published := include "sothanav-ha-pg.publishedName" . -}}
+{{- $replicas := int .Values.replicas -}}
+PostgreSQL HA (repmgr + pgcat) — release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+  nodes     {{ $fullName }}-0 .. {{ $fullName }}-{{ sub $replicas 1 }}  ({{ $replicas }} x PostgreSQL 18 + repmgrd, one {{ .Values.persistence.accessMode }} volume each)
+  clients   {{ $pgcat }}.{{ $ns }}.svc:{{ .Values.pgcat.service.port }}  (read/write split pooler)
+  failover  repmgr.failover={{ .Values.repmgr.failover }}{{ if .Values.metrics.enabled }}   metrics  ServiceMonitor + PrometheusRule rendered{{ else }}   metrics  off (metrics.enabled=false){{ end }}
+
+1. Watch the bootstrap. Pods come up {{ ternary "one at a time" "all at once (podManagementPolicy: Parallel)" (eq (int .Values.bootstrap.primaryOrdinal) 0) }};
+   ordinal {{ int .Values.bootstrap.primaryOrdinal }} runs initdb and registers as the primary, the rest clone from it:
+
+   kubectl -n {{ $ns }} rollout status statefulset/{{ $fullName }} --timeout=15m
+   kubectl -n {{ $ns }} logs {{ $fullName }}-0 -f      # repmgrd + server log, one stream
+
+   A cold volume is minutes; a standby cloning an existing database is bounded only by
+   size and the volume (probes.startup tolerates 30 min by default).
+
+2. Ask the cluster who is who — from PostgreSQL, not from Kubernetes:
+
+   kubectl -n {{ $ns }} exec {{ $fullName }}-0 -- as-postgres repmgr -f /etc/repmgr/repmgr.conf cluster show
+   kubectl -n {{ $ns }} exec {{ $fullName }}-0 -- as-postgres psql -U postgres -d {{ .Values.auth.database }} \
+     -tAc 'SELECT pg_is_in_recovery()'
+
+3. What pgcat is configured to do right now (the annotations are written by the cluster):
+
+   kubectl -n {{ $ns }} get cm {{ $published }} -o jsonpath='{.metadata.annotations.pg-ha\.sothana\.io/primary}'
+
+   Empty means nothing has been published yet: the primary node publishes during its own
+   startup, and pgcat's container waits for that file on purpose.
+
+4. Connect through the pooler (never directly to a node for application traffic):
+
+   kubectl -n {{ $ns }} run psql --rm -it --restart=Never --image=postgres:18-bookworm -- \
+     psql --host {{ $pgcat }}.{{ $ns }}.svc --port {{ .Values.pgcat.service.port }} \
+          --username {{ .Values.auth.username }} --dbname {{ .Values.auth.database }}
+
+   Password: key {{ .Values.auth.postgresPasswordKey }} of Secret {{ .Values.auth.existingSecret }},
+   which this chart never rendered into a manifest:
+
+   kubectl -n {{ $ns }} get secret {{ .Values.auth.existingSecret }} \
+     -o jsonpath='{.data.{{ .Values.auth.postgresPasswordKey }}}' | base64 -d
+
+5. {{ if eq .Values.repmgr.failover "automatic" }}Failover drill — the only way to know automatic failover works:{{ else }}Failover drill — with repmgr.failover=manual nothing promotes itself, so this is a manual promotion:{{ end }}
+
+   kubectl -n {{ $ns }} delete pod {{ $fullName }}-{{ int .Values.bootstrap.primaryOrdinal }} --force --grace-period=0
+   watch kubectl -n {{ $ns }} exec {{ $fullName }}-1 -- as-postgres \
+     repmgr -f /etc/repmgr/repmgr.conf cluster show
+
+   {{- if eq .Values.repmgr.failover "automatic" }}
+
+   Expect: a standby promotes, pgcat's config is republished within
+   {{ .Values.pgcat.watchIntervalSeconds }}s (sidecar) + 3s (pgcat autoreload), and the killed
+   node rejoins as a standby through "node rejoin --force-rewind" when its pod returns.
+   Measured end to end on a 3-node cluster: writes through pgcat fail for about 15 seconds
+   after the kill, then succeed again against the new primary.
+   {{- else }}
+
+   Expect: NO promotion (that is what manual buys you — no risk of two primaries). Promote
+   deliberately once you have decided the primary is gone:
+   kubectl -n {{ $ns }} exec {{ $fullName }}-1 -- as-postgres \
+     repmgr -f /etc/repmgr/repmgr.conf standby promote
+   pgcat follows within {{ .Values.pgcat.watchIntervalSeconds }}s of that command, on its own.
+   {{- end }}
+
+ {{- /*
+  Deliberately no PodDisruptionBudget in this chart (README: Node drains), so say what that
+  means for the one operation that will notice: a drain.
+  */}}
+
+   Drains: this chart renders no PodDisruptionBudget, so `kubectl drain` may evict a majority
+   of the {{ $replicas }} nodes at once and take the cluster down with it. Add a budget with
+   minAvailable: {{ div (add $replicas 2) 2 }} before routine maintenance (README.md).
+{{- if and (eq .Values.repmgr.failover "automatic") (eq (mod $replicas 2) 0) }}
+
+   NOTE: replicas is even ({{ $replicas }}). That is allowed, but an even node count means
+   no majority for "is the primary gone" — two halves can each promote. Prefer an odd count.
+{{- end }}
+{{- if not .Values.persistence.enabled }}
+
+   WARNING: persistence.enabled=false — every pod starts from an empty volume, and a
+   failover promotes a node with NO data. Development only.
+{{- end }}
+{{- if eq .Values.persistence.storageClass "" }}
+
+   NOTE: persistence.storageClass="" — the cluster default StorageClass is used. Confirm
+   it is ReadWriteOnce-capable and that its provisioner survives a node reboot.
+{{- end }}
+
+Uninstall ({{ .Values.persistence.reclaimPolicy }} by default, so the volumes and their data stay):
+
+   helm uninstall {{ .Release.Name }} -n {{ .Release.Namespace }}
+   kubectl -n {{ $ns }} get pvc -l app.kubernetes.io/name={{ include "sothanav-ha-pg.name" . }}
+
+README.md in this directory covers the image build, RBAC, password rotation, the
+ConfigMap-based pgcat plumbing, and troubleshooting.

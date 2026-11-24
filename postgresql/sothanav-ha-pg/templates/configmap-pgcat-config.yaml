@@ -1,0 +1,42 @@
+{{/*
+The LIVE pgcat config: one key, `pgcat.toml`, that the cluster owns at runtime.
+
+  writer  pgcat-role-sync.sh on the primary node (PATCH through the API, RBAC-scoped)
+  reader  pgcat-config-watch.sh beside pgcat, every pgcat.watchIntervalSeconds
+
+It starts EMPTY and that is the safe state: pgcat's container waits for a non-empty file
+(`command` below), and the sidecar ignores an empty value rather than publishing it, so
+nothing can route writes to a node repmgr has already demoted. The primary node's
+entrypoint runs a sync as part of its own startup, so the key is populated before the
+pooler has anything to answer with.
+
+`lookup` keeps whatever the cluster published on `helm upgrade`. Without it, Helm would
+rewrite this key to "" on every upgrade — self-healing within pgcatSyncSeconds, but with a
+window in which pgcat is pointed at `bootstrap.primaryOrdinal` rather than the node that
+actually won the last failover. Offline renders (`helm template`) see no cluster and get
+"" as above.
+*/}}
+{{- $name := include "sothanav-ha-pg.publishedName" . -}}
+{{- $ns := include "sothanav-ha-pg.namespace" . -}}
+{{- $existing := (lookup "v1" "ConfigMap" $ns $name) | default dict -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "sothanav-ha-pg.componentLabels" (list . "pgcat") | nindent 4 }}
+  {{- /*
+  Written by the cluster, not by the operator. These three annotations are what a
+  post-incident review reads: which node published last, when, and which primary it saw.
+  */}}
+  annotations:
+    pg-ha.sothana.io/writer: pgcat-role-sync.sh
+    pg-ha.sothana.io/primary: ""
+    pg-ha.sothana.io/synced-by: ""
+    pg-ha.sothana.io/synced-at: ""
+    {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations)) }}
+    {{- . | nindent 4 }}
+    {{- end }}
+data:
+  pgcat.toml: {{ dig "data" "pgcat.toml" "" $existing | quote }}

@@ -1,0 +1,35 @@
+{{/*
+Chart-owned inputs the database pods read at boot, mounted read-only at /templates:
+
+  pgcat.toml.tpl        template pgcat-role-sync.sh renders on every role change
+  postgresql-append.conf  postgresqlConfig, appended to postgresql.conf on FIRST init only
+  repmgr-extra.conf     repmgr.settings, appended to repmgr.conf on every pod start
+
+Nothing writes this ConfigMap at runtime — that is the live one, `pgcat-config`.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sothanav-ha-pg.confName" . }}
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.componentLabels" (list . "database") | nindent 4 }}
+  {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+data:
+  pgcat.toml.tpl: |
+    {{- include "sothanav-ha-pg.pgcatTemplate" . | nindent 4 }}
+  {{- with .Values.postgresqlConfig }}
+  # Appended to `$PGDATA/postgresql.conf` only while the volume is empty. On a populated
+  # volume nothing reads this file: change live settings with ALTER SYSTEM + pg_reload_conf().
+  postgresql-append.conf: |
+    {{- include "sothanav-ha-pg.postgresqlAppendConf" $ | trim | nindent 4 }}
+  {{- end }}
+  {{- with .Values.repmgr.settings }}
+  # repmgr reads repmgr.conf once per start, so these lines apply on the next pod restart
+  # (which the checksum annotation on the pod template forces).
+  repmgr-extra.conf: |
+    {{- include "sothanav-ha-pg.repmgrExtraConf" $ | trim | nindent 4 }}
+  {{- end }}

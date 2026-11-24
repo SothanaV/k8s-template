@@ -1,0 +1,21 @@
+# Local credential copies — never package these
+*.local.yaml
+*.local.yml
+*.local
+*.env
+
+# Editors / VCS
+*.swp
+*.bak
+*.backup
+*.old
+.git/
+.gitignore
+.idea/
+.vscode/
+*.orig
+.rej
+
+# Rendered output
+out/
+*.rendered.yaml

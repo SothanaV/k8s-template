@@ -1,0 +1,40 @@
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+{{/*
+Scrapes pgcat's built-in exporter (`enable_prometheus_exporter` in the template, port 9930).
+Needs the monitoring.coreos.com CRDs — which is why `metrics.enabled` defaults to false:
+without them the install fails on "no matches for kind ServiceMonitor", so a cluster
+without kube-prometheus-stack turns this off rather than fails later.
+
+The database nodes export nothing: repmgr has no exporter, and the useful node-level
+signals (who is primary, who is streaming) come from `repmgr cluster show` and from the
+ConfigMap annotations until a postgres_exporter is deployed next to this release.
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "sothanav-ha-pg.pgcatName" . }}
+  namespace: {{ include "sothanav-ha-pg.namespace" . }}
+  labels:
+    {{- include "sothanav-ha-pg.componentLabels" (list . "pgcat") | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with (include "sothanav-ha-pg.annotations" (list .Values.commonAnnotations)) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
+spec:
+  namespaceSelector:
+    names:
+      - {{ include "sothanav-ha-pg.namespace" . }}
+  selector:
+    matchLabels:
+      {{- include "sothanav-ha-pg.componentSelectorLabels" (list . "pgcat") | nindent 6 }}
+  endpoints:
+    # -- Matches the Service port named `metrics`, i.e. pgcat's exporter on 9930
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+      honorLabels: false
+{{- end }}
