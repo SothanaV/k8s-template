@@ -1,0 +1,144 @@
+# superset-mcp: Deployment + Service
+#
+# IMPORTANT — MCP settings are NOT environment variables.
+# superset/mcp_service/auth.py reads them via current_app.config.get(...), so
+# Flask config is populated ONLY from superset_config.py. Setting MCP_* as a
+# container env var is silently ignored. Put MCP_* keys in the superset-config
+# secret's superset_config.py instead (see mcp-config-append.py in this folder).
+#
+# This manifest is kept in sync with the live object in ns/superset.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: superset-mcp
+  namespace: superset
+  labels:
+    app: superset-mcp
+    component: mcp-service
+spec:
+  # Keep at 1 unless MCP_EVENT_STORE_CONFIG points at shared Redis. Streamable-HTTP
+  # sessions are in-process, so >1 replica without a shared event store makes
+  # long-running sessions bounce between pods.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: superset-mcp
+  template:
+    metadata:
+      labels:
+        app: superset-mcp
+        component: mcp-service
+    spec:
+      imagePullSecrets:
+        - name: reg-magnecomp-secret
+      containers:
+        - name: mcp-service
+          image: reg.magnecomp.com/mom-analytics/superset/superset:20260626
+          imagePullPolicy: IfNotPresent
+          # FIXME: runtime `pip install` needs PyPI egress on every boot and is
+          # unpinned. Bake fastmcp into the image and drop the shell wrapper.
+          command:
+            - "/bin/sh"
+            - "-c"
+            - |
+              pip install fastmcp && \
+              superset mcp run --host 0.0.0.0 --port 5008
+          ports:
+            - name: mcp
+              containerPort: 5008
+              protocol: TCP
+          env:
+            - name: FLASK_APP
+              value: superset
+            # Makes /app/pythonpath/superset_config.py importable; Superset logs
+            # "Loaded your LOCAL configuration at [...]" when it picks it up.
+            - name: PYTHONPATH
+              value: /app/pythonpath
+          # superset_config.py reads DB_USER/DB_PASS/DB_HOST/DB_PORT/DB_NAME and
+          # REDIS_* from this secret, so envFrom is required.
+          #
+          # Do NOT re-add these:
+          #   DATABASE_URI        -> key does not exist in superset-env, and the
+          #                          SQLAlchemy URI comes from superset_config.py.
+          #                          Referencing it caused CreateContainerConfigError.
+          #   SUPERSET_USERNAME /
+          #   SUPERSET_PASSWORD   -> plaintext admin creds in the Deployment spec,
+          #                          and unused by any code path.
+          #   SUPERSET_BASE_URL,
+          #   MCP_AUTH_ENABLED,
+          #   MCP_DEV_USERNAME    -> inert as env vars (see header).
+          #
+          # WARNING: omitting them here does NOT delete them from the cluster.
+          # They were added by hand through the dashboard, so they are absent
+          # from kubectl.kubernetes.io/last-applied-configuration and the
+          # apply-time merge leaves them in place. `kubectl diff` confirms only
+          # DATABASE_URI is removed. Strip the rest explicitly:
+          #
+          #   kubectl -n superset set env deploy/superset-mcp -c mcp-service \
+          #     SUPERSET_USERNAME- SUPERSET_PASSWORD- SUPERSET_BASE_URL- \
+          #     MCP_AUTH_ENABLED-
+          #
+          # Then rotate the exposed admin password; it has been sitting in a
+          # readable Deployment spec for months.
+          envFrom:
+            - secretRef:
+                name: superset-env
+          volumeMounts:
+            - name: superset-config
+              mountPath: /app/pythonpath
+              readOnly: true
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          # Probes MUST stay tcpSocket. This build exposes no HTTP health route:
+          #   /  404   /health  404   /mcp/health  404   /healthz  404   /metrics  404
+          #   /mcp 405 (method not allowed on GET -> the only real route)
+          # PRODUCTION.md documents GET /health, but no such route is registered;
+          # health is only the `health_check` MCP tool. An httpGet probe on /health
+          # fails permanently and CrashLoops the pod.
+          livenessProbe:
+            tcpSocket:
+              port: mcp
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: mcp
+            initialDelaySeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+            periodSeconds: 10
+          startupProbe:
+            tcpSocket:
+              port: mcp
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+            periodSeconds: 5
+      volumes:
+        - name: superset-config
+          secret:
+            secretName: superset-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: superset-mcp
+  namespace: superset
+  labels:
+    app: superset-mcp
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5008
+      targetPort: mcp
+      protocol: TCP
+      name: mcp
+  selector:
+    app: superset-mcp

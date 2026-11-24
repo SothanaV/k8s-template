@@ -1,0 +1,74 @@
+# Edge lockdown for the Superset MCP endpoint.
+#
+# WHY: MCP_DEV_USERNAME="admin" means the MCP service has NO application-layer
+# authentication -- whoever reaches it acts as Superset Admin (execute_sql over
+# every database). The only remaining boundary is network reachability.
+#
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE CHANGING THE ANNOTATION
+# ---------------------------------------------------------------------------
+# This cluster runs Traefik v3.7.16 with the **kubernetesingressnginx**
+# provider (Traefik Hub nginx-migration), NOT the standard kubernetesingress
+# provider:
+#
+#   --providers.kubernetesingressnginx
+#   --providers.kubernetesingressnginx.controllerClass=k8s.io/ingress-nginx
+#   --providers.kubernetesingressnginx.ingressClass=traefik
+#
+# Consequence: the ordinary Traefik annotations are silently IGNORED here.
+# A `traefik.io/v1alpha1 Middleware` with ipAllowList referenced via
+#   traefik.ingress.kubernetes.io/router.middlewares: superset-...@kubernetescrd
+# was verified INEFFECTIVE -- inverting the allowlist to 203.0.113.0/24 still
+# returned HTTP 200. Use the nginx-style annotation instead, which was verified
+# to work (203.0.113.0/24 -> 403, 10.0.0.0/8 -> 200):
+#
+#   nginx.ingress.kubernetes.io/whitelist-source-range
+#
+# Source-IP caveat: the CNI (Calico) preserves pod source IPs for in-cluster
+# traffic, so a pod calling the ingress hostname appears as 10.42.x, not as a
+# node IP. Restricting to 10.16.0.0/16 (nodes) was verified to return 403 for
+# in-cluster callers. 10.0.0.0/8 is used so internal clients keep working while
+# the public internet is blocked. Tighten this to named client CIDRs once the
+# real consumer list is known.
+#
+# Scope: this governs only traffic arriving via the ingress. In-cluster
+# workloads using superset-mcp.superset.svc:5008 bypass it entirely -- that is
+# how Open WebUI connects (verified: the MCP pod's access log shows the caller's
+# own pod IP, never a Traefik pod IP).
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: superset-mcp
+  namespace: superset
+  annotations:
+    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8"
+    # Long-running analytical SQL + Streamable-HTTP/SSE. These ARE honoured by
+    # the kubernetesingressnginx provider (unlike traefik.* annotations).
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: bi-prd-moma.tlnw.magnecomp.com
+      http:
+        paths:
+          - path: /mcp
+            pathType: Prefix
+            backend:
+              service:
+                name: superset-mcp
+                port:
+                  name: mcp
+  tls:
+    - hosts:
+        - bi-prd-moma.tlnw.magnecomp.com
+      secretName: star-tlnw-cert
+
+# NOTE: the /mcp path was REMOVED from the shared `superset` Ingress
+# (kubectl patch ingress superset -n superset --type=json
+#   -p '[{"op":"remove","path":"/spec/rules/0/http/paths/1"}]').
+# It lives here instead so the source-range restriction applies to the MCP
+# route only and never gates the Superset web UI.
