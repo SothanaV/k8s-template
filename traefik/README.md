@@ -1,21 +1,28 @@
-# Traefik (`traefik-private`)
+# Traefik ingress controller (`kube-system/traefik`)
 
-Traefik v3 as an ingress controller in the `traefik-private` namespace, fronting
-Ingress objects of class `traefik-private` through the NGINX-compatible provider
-(`providers.kubernetesIngressNGINX`) instead of the plain Kubernetes Ingress
-provider. Exposed as `NodePort`, so it works without MetalLB.
+Traefik v3 installed as the Helm release `traefik` in `kube-system`. It is the
+cluster's **only** ingress controller: IngressClass `traefik` is the cluster
+default and no other class exists (`rke2-ingress-nginx` was removed). Routes come
+from the **NGINX-compatible provider** (`providers.kubernetesIngressNGINX`), so
+Ingresses that carry `nginx.ingress.kubernetes.io/rewrite-target`, `use-regex`,
+`auth-type`, `proxy-body-size` … keep working unchanged. Exposed as `NodePort`
+`30080`/`30443`, so it needs no load balancer.
+
+Install only lives here. Everything else — current state, the 97-Ingress audit,
+proof techniques, the NGINX cut-over, troubleshooting, outstanding work — is in
+**[CUTOVER.md](CUTOVER.md)**.
 
 ## Table of Contents
 
 - [Files](#files)
 - [Prerequisites](#prerequisites)
-- [Installation](#installation)
+- [Install](#install)
 - [Verify](#verify)
 - [Values Reference](#values-reference)
 - [Using the Ingress Class](#using-the-ingress-class)
 - [Upgrade](#upgrade)
 - [Uninstall](#uninstall)
-- [Troubleshooting](#troubleshooting)
+- [Common install failures](#common-install-failures)
 - [References](#references)
 
 ---
@@ -24,110 +31,137 @@ provider. Exposed as `NodePort`, so it works without MetalLB.
 
 | File | Purpose |
 | ---- | ------- |
-| `values.yaml` | Chart overrides (3 replicas, IngressClass `traefik-private`, NGINX provider, NodePort 32080/32443) |
-| `README.md` | This file |
+| `values.yaml` | Chart overrides (3 replicas, IngressClass `traefik` as cluster default, NGINX provider, NodePort `30080`/`30443`, control-plane tolerations) |
+| `README.md` | Install guide (this file) |
+| `CUTOVER.md` | Cluster state, cut-over record, audit, troubleshooting |
 
-Chart `traefik-41.4.0` ships app version `v3.7.12` — pin `--version 41.4.0` so
-the image tag stays `docker.io/traefik:v3.7.12`.
-
-No `default-values.yaml` here; the upstream default set is large. Dump it when
-you need to look something up:
+Chart `traefik-42.2.0` ships app version `v3.7.16` — **pin `--version 42.2.0`** so
+the image tag stays `docker.io/traefik:v3.7.16`. Older scripts here don't pin it,
+which is how `v3.7.12` silently became `v3.7.16`. There is no `default-values.yaml`
+because the upstream default set is large; dump it when you need to look something
+up:
 
 ```bash
-helm show values traefik/traefik --version 41.4.0 > /tmp/traefik-default-values.yaml
+helm show values traefik/traefik --version 42.2.0 > /tmp/traefik-default-values.yaml
 ```
 
 ---
 
 ## Prerequisites
 
-- Helm 3+ with the Traefik repo added:
+- Helm 3 with the chart repo added:
 
 ```bash
 helm repo add traefik https://traefik.github.io/charts
 helm repo update
-```
-
-- NodePort range is the default Kubernetes `30000-32767`: `32080` and `32443`
-  must be free on every node and open in the datacenter firewall.
-- The namespace, created once:
-
-```bash
-kubectl create ns traefik-private
-```
-
-> **Warning**: this chart installs the `traefik.io` CRDs (IngressRoute,
-> Middleware, TLSOption, …) from its `crds/` directory. Helm never removes CRDs
-> on uninstall, and it does not upgrade them — see [Upgrade](#upgrade).
-
----
-
-## Installation
-
-Run from `traefik/` so the relative `-f` path resolves.
-
-### 1. Check available versions
-
-```bash
 helm search repo traefik/traefik --versions | head -n 10
 ```
 
-### 2. Install
+- NodePort `30080` and `30443` free on every node (default range is `30000-32767`).
+  They used to belong to `rke2-ingress-nginx-controller`, which is deleted:
 
 ```bash
-helm upgrade -i traefik-private traefik/traefik \
-  -n traefik-private --version 41.4.0 \
-  -f values.yaml
+kubectl get svc -A -o json | jq -r '.items[] | select(.spec.type=="NodePort")
+  | . as $s | .spec.ports[] | select(.nodePort==30080 or .nodePort==30443)
+  | "\(.nodePort)  \($s.metadata.namespace)/\($s.metadata.name)"'
+```
+
+  Expected output: nothing. Anything else is a port owner that must be removed
+  first — the API then rejects the whole install
+  (`spec.ports[0].nodePort … provided port is already allocated`).
+
+- No namespace to create — this release lives in `kube-system`.
+
+> **Warning**: the chart installs the `traefik.io` CRDs (IngressRoute, Middleware,
+> TLSOption, …) from its `crds/` directory. Helm installs those once, never
+> upgrades them, and never removes them — see [Upgrade](#upgrade).
+
+---
+
+## Install
+
+Run from the `traefik/` directory so the relative `-f` path resolves.
+
+```bash
+helm upgrade -i traefik traefik/traefik \
+  -n kube-system --version 42.2.0 \
+  -f values.yaml --wait --atomic --timeout 5m
 ```
 
 `helm upgrade -i` covers the first install and every later change. **The
 subcommand is `upgrade`, not `update` — `helm update` does not exist.**
+`--atomic` rolls the release back automatically if the rollout never becomes Ready.
+
+> **Warning**: `helm upgrade` without `-f values.yaml` replaces every
+> user-supplied value with chart defaults. It does not fail loudly — Traefik comes
+> back and every Ingress 404s. Start from what is live when in doubt:
+>
+> ```bash
+> helm -n kube-system get values traefik -o json > /tmp/current.json
+> ```
 
 ---
 
 ## Verify
 
 ```bash
-kubectl -n traefik-private get pods,svc,ingressclass
+kubectl -n kube-system get pods,svc -l app.kubernetes.io/name=traefik
+kubectl get ingressclass
 ```
 
-Expected output: 3 `traefik-private` pods `Running`, the `traefik-private`
-Service of type `NodePort` on `80:32080, 443:32443`, and the IngressClass
-`traefik-private` with controller `traefik.io/ingress-controller`.
+Expected: 3 Traefik pods `Running`, Service `traefik` `NodePort` on
+`80:30080, 443:30443`, and one class `traefik` with controller
+`traefik.io/ingress-controller`.
 
-Then check the `targetPort`s. `get svc` prints `80:32080, 443:32443` identically
-whether `targetPort` is `web` or the literal `80`, but only `web`/`websecure`
-point at the ports Traefik listens on (`8000`/`8443`):
+Check the `targetPort`s explicitly. `get svc` prints `80:30080, 443:30443`
+identically whether `targetPort` is `web` or the literal `80`, and only
+`web`/`websecure` point at the ports Traefik listens on (`8000`/`8443`):
 
 ```bash
-kubectl -n traefik-private get svc traefik-private \
-  -o jsonpath='{range .spec.ports[*]}{.name}={.targetPort} {" "}{end}{"\n"}'
+kubectl -n kube-system get svc traefik \
+  -o jsonpath='{range .spec.ports[*]}{.name}={.targetPort} nodePort={.nodePort}{"\n"}{end}'
 ```
 
-Expected output: `web=web websecure=websecure`. Port `name: http`/`https` or
-`targetPort: 80`/`443` means someone edited the Service outside Helm — every
-NodePort connection then fails with `connection refused`. See
-[Troubleshooting](#troubleshooting).
+Expected output:
 
-> **Warning**: The `targetPort` and port `name` fields are the usual casualties
-> of editing this Service in Lens or with `kubectl edit`. A values-based
-> `helm upgrade` is the only fix; re-editing brings the outage back.
+```
+web=web nodePort=30080
+websecure=websecure nodePort=30443
+```
 
-Confirm the providers Traefik actually started with — the container args are the
+`targetPort: 80`/`443`, or port names renamed to `http`/`https`, means the Service
+was edited outside Helm and every NodePort connection will get `connection
+refused`. Fix it with a values-based `helm upgrade`, never by re-editing.
+
+Confirm the providers Traefik actually started with — container args are the
 source of truth:
 
 ```bash
-kubectl -n traefik-private get deploy traefik-private -o jsonpath='{.spec.template.spec.containers[0].args}' | tr ',' '\n' | grep providers
+kubectl -n kube-system get deploy traefik \
+  -o jsonpath='{.spec.template.spec.containers[0].args}' | tr ',' '\n' | grep -E 'providers|entryPoints'
 ```
 
-Expected output: `--providers.kubernetescrd` and
-`--providers.kubernetesingressnginx.ingressClass=traefik-private`. There must be
-no plain `--providers.kubernetesingress` entry.
+Expected:
 
-Smoke test (echo server + Ingress on this class):
+```
+--entryPoints.web.address=:8000/tcp
+--entryPoints.websecure.address=:8443/tcp
+--entryPoints.websecure.http.tls=true
+--providers.kubernetescrd
+--providers.kubernetesingressnginx
+--providers.kubernetesingressnginx.ingressClass=traefik
+--providers.kubernetesingressnginx.ingressClassByName=true
+--providers.kubernetesingressnginx.publishservice=kube-system/traefik
+--providers.kubernetesingressnginx.watchIngressWithoutClass=false
+```
+
+There must be **no** `--providers.kubernetesingress` line; if it appears, two
+providers are watching Ingresses and every route is duplicated.
+
+Smoke test with a throwaway app:
 
 ```bash
-kubectl -n traefik-private apply -f - <<'EOF'
+kubectl -n kube-system apply -f - <<'EOF'
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -161,7 +195,7 @@ kind: Ingress
 metadata:
   name: whoami
 spec:
-  ingressClassName: traefik-private
+  ingressClassName: traefik
   rules:
     - host: whoami.example.local
       http:
@@ -173,289 +207,159 @@ EOF
 ```
 
 ```bash
-curl -s -H "Host: whoami.example.local" http://<NODE_IP>:32080/
+curl -s -H "Host: whoami.example.local" http://<NODE_IP>:30080/    # -> whoami body
+kubectl -n kube-system delete deploy,svc,ingress whoami
 ```
 
-Expected output: the whoami body listing `Hostname` and headers. **Use a worker
-node's IP: where the datacenter firewall opens service ports only on workers,
-control-plane IPs drop `3xxxx` traffic silently — a timeout, not a clean
-refusal.** Remove the test objects afterwards:
+`/ping` is on the internal `traefik` entry point (8080), which the Service does not
+expose. It separates "Traefik is down" from "routing is wrong", because it answers
+even when no Ingress matches:
 
 ```bash
-kubectl -n traefik-private delete deploy,svc,ingress whoami
+kubectl -n kube-system port-forward deploy/traefik 8080:8080
+curl -s http://127.0.0.1:8080/ping        # -> OK
 ```
 
-`/ping` is on the `traefik` entry point (8080), which is intentionally not
-exposed by the Service. Reach it locally:
-
-```bash
-kubectl -n traefik-private port-forward deploy/traefik-private 8080:8080
-curl -s http://127.0.0.1:8080/ping
-```
-
-Expected output: `OK`. Use this to separate "Traefik is down" from "routing is
-wrong" — `/ping` answers even when no Ingress matches.
-
-**The dashboard and `/api/*` are dead with these values.** The chart ships
-`api.dashboard: true` but nothing else, which renders only
-`--api.dashboard=true`; Traefik then serves the dashboard on no entry point, so
-`/dashboard/` and `/api/overview` both return Traefik's own 404 body. Set
-`api.insecure: true` to bind the API to this entry point:
-
-```bash
-helm template t traefik/traefik --version 41.4.0 -n traefik-private -f values.yaml \
-  --set api.insecure=true | grep -- '--api'
-```
-
-Expected output: `--api.dashboard=true` and `--api.insecure=true`.
-
-> **Warning**: `api.insecure` serves the API and dashboard **without
-> authentication**. Keep it off in shared clusters — the Service does not expose
-> 8080, so port-forward is the safe access path when you do enable it.
+The dashboard and `/api/*` answer `404` with these values — that is expected, not
+a broken install. `--api.dashboard=true` is present but binds the API to no entry
+point; [CUTOVER.md → Dashboard and API](CUTOVER.md#dashboard-and-api) has the three
+ways to switch it on.
 
 ---
 
 ## Values Reference
 
+`values.yaml`, matching the live release:
+
 | Parameter | Description | Value here |
 | --------- | ----------- | ---------- |
 | `deployment.replicas` | Number of Traefik pods | `3` |
 | `ingressClass.enabled` | Create an IngressClass | `true` |
-| `ingressClass.isDefaultClass` | Do **not** make it the cluster default — `nginx` stays default | `false` |
-| `ingressClass.name` | IngressClass object name | `traefik-private` |
-| `ports.web.nodePort` | NodePort for HTTP (`:8000`) | `32080` |
-| `ports.websecure.nodePort` | NodePort for HTTPS (`:8443`) | `32443` |
+| `ingressClass.isDefaultClass` | Make `traefik` the cluster default | `true` |
+| `ingressClass.name` | IngressClass object name | `traefik` |
+| `ports.web.nodePort` | NodePort for HTTP (`:8000`) | `30080` |
+| `ports.websecure.nodePort` | NodePort for HTTPS (`:8443`) | `30443` |
 | `service.spec.type` | Service type | `NodePort` |
 | `providers.kubernetesIngress.enabled` | Plain Ingress provider — off, the NGINX provider owns Ingress objects | `false` |
 | `providers.kubernetesIngressNGINX.enabled` | NGINX-compatible Ingress provider | `true` |
-| `providers.kubernetesIngressNGINX.ingressClass` | Ingress class name handled by this controller | `traefik-private` |
+| `providers.kubernetesIngressNGINX.ingressClass` | Class handled by this controller | `traefik` |
 | `providers.kubernetesIngressNGINX.ingressClassByName` | Match the class by name, not only by controller value | `true` |
-| `providers.kubernetesIngressNGINX.publishService.enabled` | Write the front-end Service into Ingress status — off for NodePort | `false` |
+| `providers.kubernetesIngressNGINX.publishService.enabled` | Write the front-end Service into Ingress status | `true` |
 | `providers.kubernetesIngressNGINX.watchIngressWithoutClass` | Ignore Ingresses with no class | `false` |
+| `tolerations` | Allow pods on tainted nodes | control-plane `NoSchedule` **and** etcd `NoExecute` |
+
+Both tolerations are required — tolerating only the control-plane taint is a no-op
+([CUTOVER.md → Running on control-plane nodes](CUTOVER.md#running-on-control-plane-nodes)).
 
 Not set here, worth knowing:
 
 | Parameter | Chart default | Effect here |
 | --------- | ------------- | ----------- |
-| `providers.kubernetesCRD.enabled` | `true` | `IngressRoute`/`Middleware` CRDs still work alongside the NGINX provider |
-| `providers.kubernetesIngressNGINX.controllerClass` | `k8s.io/ingress-nginx` | Left untouched; `ingressClassByName: true` is what makes `traefik-private` match |
+| `providers.kubernetesCRD.enabled` | `true` | `IngressRoute`/`Middleware` still work alongside the NGINX provider |
+| `providers.kubernetesIngressNGINX.controllerClass` | `k8s.io/ingress-nginx` | Untouched; `ingressClassByName: true` is what makes `traefik` match |
 | `ports.traefik.expose.default` | `false` | Dashboard/`/ping` stay cluster-internal |
-| `ingressClass` on rendered class | `traefik.io/ingress-controller` | Fixed controller for the class |
-| `affinity` | `{}` | No anti-affinity — 3 replicas can land on one node |
+| `resources` | unset | No requests/limits — set them before sharing nodes with etcd |
+| `affinity` | `{}` | No anti-affinity; 3 replicas can land on one node |
 | `podDisruptionBudget.enabled` | `false` | No PDB |
+| `logs.access` | off | No per-request log, so you cannot see which router served a request |
 
 ---
 
 ## Using the Ingress Class
 
-Every app that should be served by this Traefik must name the class explicitly —
-with `isDefaultClass: false` and `watchIngressWithoutClass: false`, this release
-only handles Ingresses tagged `traefik-private`.
+`traefik` is the default class and `watchIngressWithoutClass: false`, so an Ingress
+with no class gets `traefik` at admission, while one explicitly set to anything
+else is ignored forever. Say it out loud anyway — one line, and it survives a
+review:
 
 ```yaml
 spec:
-  ingressClassName: traefik-private
+  ingressClassName: traefik
 ```
 
-The shared `nginx` class in this repo is unaffected; the two controllers coexist
-because each only handles its own class.
-
-`publishService.enabled: false` means `kubectl describe ingress` shows no
-`Address`. That is expected on a NodePort front end — point clients (and DNS) at
-`<NODE_IP>:32080` / `<NODE_IP>:32443`.
+`publishService.enabled: true` writes the front-end Service into
+`Ingress.status`. Because that Service is `NodePort`, the address written is the
+**ClusterIP** — valid-looking but useless for DNS automation. Point clients at
+`<NODE_IP>:30080` / `<NODE_IP>:30443`, or publish real addresses with
+`providers.kubernetesIngressNGINX.publishService.addresses`.
 
 ---
 
 ## Upgrade
 
 ```bash
-helm upgrade traefik-private traefik/traefik \
-  -n traefik-private --version <NEW_CHART_VERSION> \
-  -f values.yaml
+helm -n kube-system history traefik | tail -3        # record the current revision
+helm upgrade traefik traefik/traefik \
+  -n kube-system --version <NEW_CHART_VERSION> \
+  -f values.yaml --wait --atomic --timeout 5m
+helm -n kube-system rollback traefik <REV>           # if you need to back out by hand
 ```
 
-`crds/` is a one-time install directory — Helm will not update the `traefik.io`
-CRDs. When the new chart version requires newer CRDs, pull the chart and apply
-its CRDs by hand first:
+`crds/` is a one-time directory — Helm will not update the `traefik.io` CRDs. When
+the new chart needs newer CRDs, apply them yourself first:
 
 ```bash
 helm pull traefik/traefik --version <NEW_CHART_VERSION> --untar --untardir /tmp
 kubectl apply --server-side -f /tmp/traefik/crds/
 ```
 
-Rollout is a rolling update of 3 pods; existing routes keep serving.
+Rollout is a rolling update of 3 pods and existing routes keep serving; expect a
+handful of dropped in-flight requests during the roll.
 
 ---
 
 ## Uninstall
 
+> **Warning**: Traefik serves **every** Ingress in the cluster. Uninstalling it
+> takes all public hostnames dark and there is no NGINX left to catch the traffic.
+> Stage a replacement front end first.
+
 ```bash
-helm uninstall traefik-private -n traefik-private
-kubectl delete ns traefik-private
+helm uninstall traefik -n kube-system
 ```
 
-> **Warning**: CRDs and any `IngressRoute`/`Middleware` objects survive even
-> namespace deletion. Removing the CRD types deletes all of those custom
-> resources cluster-wide — confirm nothing else uses the `traefik.io` API group:
->
-> ```bash
-> kubectl get apiservice | grep traefik.io
-> kubectl get crd | grep traefik.io
-> ```
+The `traefik` IngressClass and the `traefik.io` CRDs stay behind (Helm never
+removes CRDs). Do **not** `kubectl delete ns kube-system` — this release lives
+there, but so does everything else. Before deleting the CRD *types*, confirm
+nothing still uses them:
+
+```bash
+kubectl get crd | grep traefik.io
+kubectl get ingressroute,middleware -A
+```
 
 ---
 
-## Troubleshooting
+## Common install failures
 
-- **`helm: command 'update' is not valid`** — the correct form is
-  `helm upgrade -i traefik-private traefik/traefik -n traefik-private --version 41.4.0 -f values.yaml`.
-- **404 but which 404?** — before anything else, tell Traefik's own 404 from the
-  backend's. Traefik's is `Content-Length: 19` ("404 page not found\n") with
-  `x-content-type-options: nosniff`; a backend 404 is `18` and carries the app's
-  own headers, e.g. `access-control-allow-*`. **A backend 404 means routing
-  works** — debug the app path, not Traefik.
-
-```bash
-curl -sS -D- -o /dev/null -H "Host: <APP_HOSTNAME>" http://<NODE_IP>:32080/
-```
-
-  To confirm a suspected backend 404, probe from inside the pod — the identical
-  response proves Traefik is innocent:
-
-```bash
-kubectl -n <APP_NS> exec deploy/<APP> -- sh -c 'wget -qO- -S http://127.0.0.1:<PORT>/'
-```
-
-- **404 with no backend headers, `Content-Length: 19`** — the Ingress was never
-  loaded by this controller, usually because it is not tagged with the class.
-  Check:
-
-```bash
-kubectl get ingress -A --field-selector metadata.name=<INGRESS_NAME> \
-  -o jsonpath='{.items[*].spec.ingressClassName}{"\n"}'
-kubectl get events -n traefik-private --sort-by=.lastTimestamp | grep -i nginx
-```
-
-  Fix by setting `spec.ingressClassName: traefik-private`.
-- **App Ingress is served by NGINX ingress instead of Traefik** — the Ingress
-  says `ingressClassName: nginx` (the repo default). Both controllers are
-  installed; the class string selects which one owns the route.
-- **`kubectl describe ingress` shows no `Address`** — expected with
-  `publishService.enabled: false`. Nothing is broken; the NodePort is the front
-  end.
-- **HTTPS on 32443 fails with a certificate error** — Traefik answers with
-  `CN=TRAEFIK DEFAULT CERT` when no `spec.tls` secret matches the SNI. Read the
-  served cert instead of guessing:
-
-```bash
-echo | openssl s_client -connect <NODE_IP>:32443 -servername <APP_HOSTNAME> 2>/dev/null \
-  | openssl x509 -noout -subject -ext subjectAltName
-```
-
-  Three causes, in the order to rule them out:
-
-  1. Missing `spec.tls` on the Ingress, or the named Secret is absent from the
-     Ingress's own namespace (it must be same-namespace, not cluster-wide):
-
-```yaml
-spec:
-  tls:
-    - secretName: <TLS_SECRET_NAME>
-      hosts:
-        - <APP_HOSTNAME>
-```
-
-  2. **The wildcard does not cover the host.** `*.tlnw.magnecomp.com` matches
-     `one-level.tlnw.magnecomp.com` but *not*
-     `api-app-ensaas.adv.tlnw.magnecomp.com` — a wildcard matches exactly one
-     label. Hosts living two levels below the wildcard's parent need their own
-     SAN or a second wildcard cert, otherwise Traefik falls back to its default
-     cert even though the Secret exists and is referenced correctly.
-  3. Malformed Secret — verify the pair actually matches:
-
-```bash
-kubectl -n <APP_NS> get secret <TLS_SECRET_NAME> -o jsonpath='{.data.tls\.crt}' | base64 -d > /tmp/t.crt
-kubectl -n <APP_NS> get secret <TLS_SECRET_NAME> -o jsonpath='{.data.tls\.key}' | base64 -d > /tmp/t.key
-openssl x509 -noout -modulus -in /tmp/t.crt | openssl md5
-openssl rsa  -noout -modulus -in /tmp/t.key | openssl md5
-```
-
-  Expected output: identical MD5s. **Use `openssl x509 -modulus`, not
-  `openssl x509 -pubkey` — piping `x509 -pubkey` into `pkey -pubout` yields an
-  empty digest (`e3b0c442...`) and looks like a mismatch when the Secret is fine.**
-
-- **Connection refused on every `3xxxx` port, pods healthy and `Ready`** — almost
-  always a hand-edited Service: `targetPort` no longer points at the entry-point
-  ports (`web`/`8000`, `websecure`/`8443`), so kube-proxy DNATs to a closed port.
-  Read it, do not eyeball `get svc`:
-
-```bash
-kubectl -n traefik-private get svc traefik-private \
-  -o jsonpath='{range .spec.ports[*]}{.name}={.targetPort} nodePort={.nodePort}{"\n"}{end}'
-```
-
-  Expected output: `web=web nodePort=32080` / `websecure=websecure nodePort=32443`.
-  The tell-tale of a Lens edit is rewritten port names (`http`/`https` instead of
-  `web`/`websecure`) plus the annotation `k8slens-edit-resource-version`, and
-  `managedFields` showing a manager other than `helm` touching the ports later
-  than the Helm release time.
-
-  To prove it from the node, read the DNAT rule kube-proxy actually programmed:
-
-```bash
-kubectl -n kube-system exec <KUBE-PROXY_POD_ON_NODE> -c kube-proxy -- \
-  sh -c 'iptables-save -t nat | grep -E "comment .*traefik.*DNAT"'
-```
-
-  (The rule comment embeds the Service's port *name*, so grep the DNAT lines
-  rather than a named chain.)
-
-  Expected output: one line per pod, `DNAT --to-destination <POD_IP>:8000`. A
-  `:80` there is the bug. On a healthy Service the comments read
-  `traefik-private/traefik-private:web`; `:http`/`:https` comments mean someone
-  renamed the ports too. Fix by re-deploying from `values.yaml`, never by
-  re-editing the Service:
-
-```bash
-helm upgrade -i traefik-private traefik/traefik -n traefik-private --version 41.4.0 -f values.yaml
-```
-
-  **A `kubectl patch` or in-place edit of this Service works for one incident and
-  guarantees the next; only the Helm release is authoritative.**
-
-- **Time-out (no refusal) on `3xxxx` for some node IPs, refusal for others** —
-  the datacenter firewall, not Kubernetes. Refusal means the packet reached
-  kube-proxy and nothing was listening; silence means it was dropped on the way.
-  On clusters where only worker nodes are opened for service ports, target the
-  workers and treat control-plane `3xxxx` time-outs as expected. Compare per node:
-
-```bash
-for ip in <WORKER_IPS> <CONTROL_PLANE_IPS>; do
-  printf "%-14s " "$ip"; timeout 4 bash -c "cat < /dev/null > /dev/tcp/$ip/32080" \
-    2>/dev/null && echo OPEN || echo closed; done
-```
-
-- **`/dashboard/` and `/api/overview` return Traefik's own 404** — expected with
-  these values; see [Verify](#verify). `--api.dashboard=true` alone binds the API
-  to nothing.
-- **Connection refused and `targetPort` is already correct** — a `nodePort`
-  collision or the node firewall. Endpoints first, then the port owner:
-
-```bash
-kubectl -n traefik-private get endpoints traefik-private   # expect 3 pod IPs
-kubectl get svc -A | grep -E "32080|32443"                 # another NodePort owns it
-```
-- **All 3 pods on one node** — no anti-affinity by default. Add
-  `affinity` (the chart's `podAntiAffinity` example) or
-  `topologySpreadConstraints` to `values.yaml` if that matters.
-- **`helm upgrade` complains the `traefik.io` CRDs already exist and differ** —
-  an earlier release installed them. Helm only owns `crds/` on the first
-  install; take them over with `kubectl apply --server-side -f <crds dir>`.
+- **`helm: command 'update' is not valid`** — it is `helm upgrade -i traefik
+  traefik/traefik -n kube-system --version 42.2.0 -f values.yaml`.
+- **`Service "traefik" is invalid: spec.ports[0].nodePort: Invalid value: 30080:
+  provided port is already allocated`** — something else still owns the port (this
+  is how release revision 1 failed, while the old nginx Service was still there).
+  The install is rejected whole, so nothing partial is left behind. Free the port,
+  re-run, and read `helm -n kube-system history traefik` for failed revisions.
+- **Everything 404s after an upgrade that "succeeded"** — you ran `helm upgrade`
+  without `-f values.yaml`, so chart defaults replaced your values. Diff against
+  `helm -n kube-system get values traefik -o json` and re-apply.
+- **`connection refused` on every `3xxxx` port while pods are `Ready`** — the
+  Service was hand-edited (`targetPort` no longer `web`/`websecure`). Read it with
+  the `jsonpath` in [Verify](#verify); re-deploy from `values.yaml` to fix. A
+  `kubectl patch` fixes one incident and guarantees the next.
+- **404 on a path you are sure is configured** — probe the path from the Ingress,
+  not `/`: a rule written `/sonarqube(/|$)(.*)` answers on `/sonarqube/` and 404s
+  on `/`. And note Traefik's 404 body is byte-identical to any Go app's
+  (`404 page not found`, 19 bytes) — [CUTOVER.md → how do I know Traefik is the one
+  answering](CUTOVER.md#how-do-i-know-traefik-is-the-one-answering) is the method.
+- **Anything else** — [CUTOVER.md → Troubleshooting](CUTOVER.md#troubleshooting)
+  (certificates, wildcards, webhooks, firewall vs kube-proxy, `rke2-ingress-nginx`
+  coming back).
 
 ---
 
 ## References
 
 - [Traefik Helm chart repository](https://github.com/traefik/traefik-helm-chart)
+- [Traefik VALUES reference](https://github.com/traefik/traefik-helm-chart/blob/master/traefik/VALUES.md)
 - [Traefik Kubernetes Ingress NGINX provider](https://doc.traefik.io/traefik/reference/install-configuration/providers/kubernetes/kubernetes-ingress-nginx/)
-- [Traefik reference (VALUES)](https://github.com/traefik/traefik-helm-chart/blob/master/traefik/VALUES.md)
+- [Traefik dashboard and API](https://doc.traefik.io/traefik/operations/dashboard/)
