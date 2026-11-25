@@ -1,0 +1,62 @@
+# Values for the CloudNativePG OPERATOR chart (cnpg/cloudnative-pg 0.29.2).
+# Overrides ONLY — compare against default-values.yaml (full chart defaults,
+# reference only). Dumping the whole default file here would pin 0.29.2-era
+# defaults over future chart upgrades, including stale image tags.
+#
+# This chart installs the operator only. The PostgreSQL cluster itself
+# (instances, storage, bootstrap, backups) is a separate `Cluster` CR —
+# see README.md / the Cluster CRD, not this file.
+#
+# Install:
+#   helm repo add cnpg https://cloudnative-pg.github.io/charts
+#   helm install cnpg cnpg/cloudnative-pg --version 0.29.2 -n cnpg-system \
+#     --create-namespace -f values.yaml
+
+image:
+  # -- Pinned so `helm upgrade` never moves the operator to a new minor
+  # untested against your Clusters. Chart 0.29.2 ships appVersion 1.30.2 —
+  # when bumping the chart, re-check: helm show values cnpg/cloudnative-pg
+  # --version <chart> | grep -A3 '^image:'
+  tag: "1.30.2"
+
+# -- 1 is enough: the operator elects a leader internally. Raise to 2-3 only
+# if you want the control plane survivable during node drains.
+replicaCount: 2
+
+# -- Defaults are {} (unbounded) — never ship that to production.
+# The operator is light; this leaves headroom for many managed Clusters.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -- Keep the operator above regular workloads in eviction/scheduling.
+# If your cluster has no such class, create one or remove this line.
+priorityClassName: system-cluster-critical
+
+crds:
+  # -- Created on first install only; `helm upgrade` will NOT update CRDs
+  # across versions. If you manage CRDs separately (ArgoCD/Flux), set false.
+  create: true
+
+config:
+  # -- true = watch every namespace (needs cluster-scoped RBAC, the default).
+  # Set false for a single-namespace install (operator >= 1.30); webhooks and
+  # RBAC are then scoped to the release namespace only.
+  clusterWide: true
+
+monitoring:
+  # -- true when prometheus-operator CRDs exist (kube-prometheus-stack).
+  # Also make sure ServiceMonitor/PodMonitor selectors match this release,
+  # or the PodMonitor is created but never scraped.
+  podMonitorEnabled: false
+
+# -- Optional: keep the operator off database/storage nodes, e.g.
+# nodeSelector:
+#   node-role.kubernetes.io/control-plane: ""
+# tolerations:
+#   - key: node-role.kubernetes.io/control-plane
+#     effect: NoSchedule

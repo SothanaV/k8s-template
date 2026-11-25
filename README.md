@@ -30,6 +30,7 @@ Helm chart templates and custom values for self-hosted Kubernetes services.
 | [SonarQube](sonarqube/README.md) | Code quality and security analysis | `sonarqube` |
 | [Superset](superset/README.md) | Data exploration and visualization | `superset` |
 | [Traefik](traefik/README.md) | Ingress controller (NGINX provider, NodePort) | `traefik-private` |
+| [Valkey HA](valkey-ha/README.md) | Valkey 8 cluster — StatefulSet + Sentinel sidecars + HAProxy R/W + R/O endpoints (custom chart) | *(per release)* |
 
 ## Prerequisites
 

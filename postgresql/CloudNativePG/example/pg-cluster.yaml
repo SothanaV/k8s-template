@@ -1,0 +1,81 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: my-postgres-prod
+  namespace: cnpg
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.2
+
+  # 0. AppArmor: containerd 2.3.4 on this node applies its generated
+  # `cri-containerd.apparmor.d` profile (enforce) to every pod, and that profile
+  # carries no `signal` rules — AppArmor answers EPERM/EACCES to every cross-process
+  # signal, even between same-UID processes of one container. PostgreSQL then dies on
+  # its own bookkeeping signals: `FATAL: could not signal for checkpoint: Permission
+  # denied` -> `startup process exited with exit code 1` -> CrashLoopBackOff, and
+  # initdb cannot run CHECKPOINT / pg_ctl stop before shutting down.
+  # Verified 2026-11-25: /proc/1/attr/current = `cri-containerd.apparmor.d//&unconfined
+  # (enforce)` here, and the same test pod signals fine with appArmorProfile: Unconfined.
+  # Pod-level (not spec.securityContext) so the operator's hardened container defaults
+  # (drop ALL, readOnlyRootFilesystem, RuntimeDefault seccomp) stay untouched.
+  # Same workaround as postgresql/sothanav-ha-pg/values.local.yaml. The real fix is
+  # containerd's default_app_armor_profile on the node — drop this once that is changed.
+  #
+  # WARNING: this field REPLACES the operator's default PodSecurityContext, so the rest
+  # of that default has to be repeated here. Dropping `fsGroup` in particular leaves a
+  # freshly provisioned volume owned by root:joining replicas then die in a retry loop
+  # with `pg_basebackup: error: could not create directory
+  # "/var/lib/postgresql/data/pgdata": Permission denied` (seen 2026-11-25 on instance 2;
+  # the already-initialised instance 1 keeps working, which makes it look unrelated).
+  # uid/gid 26 is the `postgres` user inside ghcr.io/cloudnative-pg/postgresql.
+  podSecurityContext:
+    appArmorProfile:
+      type: Unconfined
+    runAsUser: 26
+    runAsGroup: 26
+    runAsNonRoot: true
+    fsGroup: 26
+    seccompProfile:
+      type: RuntimeDefault
+
+  # 1. กำหนดชื่อ DB และ User เริ่มต้น
+  bootstrap:
+    initdb:
+      database: app_db
+      owner: app_user
+      encoding: UTF8
+      secret:
+        name: my-db-secret
+
+  # 2. จอง CPU และ RAM
+  resources:
+    requests:
+      memory: "2Gi"
+      cpu: "10m"
+    limits:
+      memory: "4Gi"
+      cpu: "2"
+
+  # 3. เลือก StorageClass และแยก Disk สำหรับ WAL
+  storage:
+    storageClass: csi-s3-block
+    size: 50Gi
+  walStorage:
+    storageClass: csi-s3-block
+    size: 10Gi
+
+  # 4. ปรับจูนค่าของ PostgreSQL
+  postgresql:
+    parameters:
+      max_connections: "200"
+      shared_buffers: "1GB"
+      work_mem: "16MB"
+
+  # 5. บังคับกระจาย Pod คนละ Node
+  affinity:
+    enablePodAntiAffinity: false
+    topologyKey: kubernetes.io/hostname
+
+  # 6. เปิด Metrics สำหรับ Prometheus
+  monitoring:
+    enablePodMonitor: true
