@@ -1,0 +1,35 @@
+{{/*
+Valkey PDB: keep a Sentinel majority during node drains, which is also what keeps
+HAProxy's R/W endpoint alive (a minority of live nodes cannot re-elect, so the
+master endpoint would sit empty even if the surviving pod IS the master).
+Validator rejects minAvailable >= replicas.
+*/}}
+{{- if .Values.podDisruptionBudget.valkey.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "valkey-ha.fullname" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "valkey") | nindent 4 }}
+spec:
+  minAvailable: {{ int .Values.podDisruptionBudget.valkey.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "valkey-ha.componentSelectorLabels" (list . "valkey") | nindent 6 }}
+{{- end }}
+{{- if and .Values.haproxy.enabled .Values.podDisruptionBudget.haproxy.enabled }}
+---
+# Losing both proxies at once blacks out the client-facing endpoint even though the
+# data plane is healthy; one surviving proxy always knows how to find the master.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "valkey-ha.haproxyName" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "haproxy") | nindent 4 }}
+spec:
+  minAvailable: {{ int .Values.podDisruptionBudget.haproxy.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "valkey-ha.componentSelectorLabels" (list $ "haproxy") | nindent 6 }}
+{{- end }}

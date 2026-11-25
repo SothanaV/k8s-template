@@ -1,0 +1,140 @@
+{{- if .Values.redisInsight.enabled }}
+{{/*
+The compose `redis-insight` container: browser GUI, connects to the HAProxy master
+endpoint with the valkey password. Off by default — it ships a public web UI with no
+built-in auth, so keep it behind the ingress rules of your cluster (or port-forward)
+rather than a LoadBalancer.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "valkey-ha.redisInsightName" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "redis-insight") | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "valkey-ha.componentSelectorLabels" (list . "redis-insight") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "valkey-ha.componentLabels" (list . "redis-insight") | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.redisInsight.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.redisInsight.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.redisInsight.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: redis-insight
+          image: {{ include "valkey-ha.redisInsightImage" . | quote }}
+          imagePullPolicy: {{ .Values.redisInsight.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.redisInsight.port }}
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          {{- with .Values.redisInsight.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          {{- if .Values.redisInsight.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "valkey-ha.redisInsightName" . }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+{{- if .Values.redisInsight.persistence.enabled }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "valkey-ha.redisInsightName" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "redis-insight") | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.redisInsight.persistence.accessModes | nindent 4 }}
+  {{- if .Values.redisInsight.persistence.storageClass }}
+  storageClassName: {{ .Values.redisInsight.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.redisInsight.persistence.size | quote }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valkey-ha.redisInsightName" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "redis-insight") | nindent 4 }}
+  {{- with .Values.redisInsight.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.redisInsight.service.type }}
+  selector:
+    {{- include "valkey-ha.componentSelectorLabels" (list . "redis-insight") | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.redisInsight.port }}
+      targetPort: http
+{{- if .Values.redisInsight.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "valkey-ha.redisInsightName" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "redis-insight") | nindent 4 }}
+  {{- with .Values.redisInsight.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.redisInsight.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.redisInsight.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.redisInsight.ingress.hostname | quote }}
+      http:
+        paths:
+          - path: {{ .Values.redisInsight.ingress.path }}
+            pathType: {{ .Values.redisInsight.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "valkey-ha.redisInsightName" . }}
+                port:
+                  name: http
+{{- end }}
+{{- end }}

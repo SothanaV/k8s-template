@@ -1,0 +1,38 @@
+{{- $fullName := include "valkey-ha.fullname" . -}}
+Valkey HA ({{ .Values.replicas }} nodes + Sentinel sidecars) released as "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+CLIENT ENDPOINTS{{ if .Values.haproxy.enabled }} (use these — HAProxy routes by live role){{ else }} (HAProxy disabled — use the per-node Services below){{ end }}:
+{{- if .Values.haproxy.enabled }}
+  R/W  (master):    {{ $fullName }}-haproxy.{{ .Release.Namespace }}.svc:{{ .Values.haproxy.masterPort }}
+  R/O  (replicas):  {{ $fullName }}-haproxy.{{ .Release.Namespace }}.svc:{{ .Values.haproxy.replicaPort }}
+  Stats UI:         http://{{ $fullName }}-haproxy.{{ .Release.Namespace }}.svc:{{ .Values.haproxy.statsPort }}/stats   (user: {{ .Values.haproxy.statsUser }})
+                    /metrics on the same port is the Prometheus exporter
+  Externally:       kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $fullName }}-haproxy {{ .Values.haproxy.masterPort }}:{{ .Values.haproxy.masterPort }}
+{{- end }}
+
+PER-NODE (plumbing / debugging — a node's role can flip after a failover):
+{{- range $i := until (int .Values.replicas) }}
+  {{ include "valkey-ha.nodeServiceName" (list $ $i) }}.{{ $.Release.Namespace }}.svc:{{ $.Values.valkey.port }} (valkey)   :{{ $.Values.sentinel.port }} (sentinel)
+{{- end }}
+
+PASSWORDS{{ if .Values.auth.existingSecret }} come from your Secret "{{ .Values.auth.existingSecret }}"{{ else }} come from the chart-created Secret "{{ (include "valkey-ha.secretName" .) }}" (CHANGE the compose-parity values before going beyond local){{ end }}:
+  kubectl -n {{ .Release.Namespace }} get secret {{ include "valkey-ha.secretName" . }} -o jsonpath='{.data.{{ .Values.auth.valkeyPasswordKey }}}' | base64 -d; echo
+
+NEXT STEPS:
+  1. Watch it assemble (ordered, AOF load first — give it a minute):
+       kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ $fullName }}
+  2. Who is master?
+       kubectl -n {{ .Release.Namespace }} exec {{ $fullName }}-0 -- \
+         valkey-cli --no-auth-warning -a "$(kubectl -n {{ .Release.Namespace }} get secret {{ include "valkey-ha.secretName" . }} -o jsonpath='{.data.{{ .Values.auth.valkeyPasswordKey }}}' | base64 -d)" \
+         -h {{ $fullName }}-haproxy info replication | head -6
+  3. Test failover the compose way — kill the current master's pod; Sentinel promotes a
+     replica, and HAProxy's master endpoint follows within a few check intervals:
+       kubectl -n {{ .Release.Namespace }} delete pod {{ $fullName }}-0
+{{- if .Values.redisInsight.enabled }}
+
+REDIS INSIGHT: http://{{ if .Values.redisInsight.ingress.enabled }}{{ .Values.redisInsight.ingress.hostname }}{{ else }}{{ $fullName }}-insight.{{ .Release.Namespace }}.svc:{{ .Values.redisInsight.port }} (port-forward){{ end }}
+  Connect with host {{ $fullName }}-haproxy, port {{ .Values.haproxy.masterPort }}, the valkey password above.
+{{- else }}
+
+Redis Insight is OFF (redisInsight.enabled=false) — enable it for the compose GUI.
+{{- end }}

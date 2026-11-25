@@ -1,0 +1,39 @@
+{{- if .Values.haproxy.enabled }}
+{{/*
+The client-facing endpoints — compose's port map (6379 R/W, 6380 R/O) as one stable
+address. This is the only thing an application needs to know about this cluster.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valkey-ha.haproxyName" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "haproxy") | nindent 4 }}
+  {{- with .Values.haproxy.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.haproxy.service.type }}
+  selector:
+    {{- include "valkey-ha.componentSelectorLabels" (list . "haproxy") | nindent 4 }}
+  ports:
+    - name: master
+      port: {{ .Values.haproxy.masterPort }}
+      targetPort: master
+      {{- if and (eq .Values.haproxy.service.type "NodePort") .Values.haproxy.service.nodePorts.master }}
+      nodePort: {{ .Values.haproxy.service.nodePorts.master }}
+      {{- end }}
+    - name: replica
+      port: {{ .Values.haproxy.replicaPort }}
+      targetPort: replica
+      {{- if and (eq .Values.haproxy.service.type "NodePort") .Values.haproxy.service.nodePorts.replica }}
+      nodePort: {{ .Values.haproxy.service.nodePorts.replica }}
+      {{- end }}
+    - name: stats
+      port: {{ .Values.haproxy.statsPort }}
+      targetPort: stats
+      {{- if and (eq .Values.haproxy.service.type "NodePort") .Values.haproxy.service.nodePorts.stats }}
+      nodePort: {{ .Values.haproxy.service.nodePorts.stats }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,27 @@
+{{/*
+Headless Service giving every pod its own DNS record (<fullname>-<i>.<headless>...)
+as the StatefulSet contract requires. publishNotReadyAddresses because the entrypoints
+resolve each other BEFORE any pod passes its first readiness check (readiness gates on
+PONG, which for a replica waits on the master) — with it false, the discovery scans in
+valkey-entrypoint.sh could not see a loading peer and a fresh install could not
+assemble itself.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valkey-ha.headlessName" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "valkey") | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "valkey-ha.componentSelectorLabels" (list . "valkey") | nindent 4 }}
+  ports:
+    - name: valkey
+      port: {{ .Values.valkey.port }}
+      targetPort: valkey
+    - name: sentinel
+      port: {{ .Values.sentinel.port }}
+      targetPort: sentinel

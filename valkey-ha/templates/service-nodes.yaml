@@ -1,0 +1,38 @@
+{{/*
+One ClusterIP Service per pod — the chart's replacement for the compose static IPs.
+Their VIPs are the addresses Sentinel persists and the entrypoints re-point to, and
+they are what makes pod reschedules survivable: kube-proxy follows the pod, the VIP
+never moves, and HAProxy (which resolves server names once at start, no resolvers
+section) keeps working. publishNotReadyAddresses keeps the discovery scans working
+against a peer that is stuck loading AOF — a node can answer INFO while its readiness
+probe is still failing, and "who reports role:master" must be able to see it.
+
+A client that wants "whatever node is currently master" should use the HAProxy
+endpoint, NOT these; these exist for cluster plumbing and direct per-node access
+(INSIGHT-style tools, debugging).
+*/}}
+{{- $root := . }}
+{{- range $i := until (int .Values.replicas) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "valkey-ha.nodeServiceName" (list $root $i) }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list $root "valkey") | nindent 4 }}
+spec:
+  type: ClusterIP
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "valkey-ha.componentSelectorLabels" (list $root "valkey") | nindent 4 }}
+    # The label the StatefulSet controller stamps on each pod — this is what pins
+    # the Service to ONE pod instead of the whole set.
+    statefulset.kubernetes.io/pod-name: {{ include "valkey-ha.fullname" $root }}-{{ $i }}
+  ports:
+    - name: valkey
+      port: {{ $root.Values.valkey.port }}
+      targetPort: valkey
+    - name: sentinel
+      port: {{ $root.Values.sentinel.port }}
+      targetPort: sentinel
+{{- end }}

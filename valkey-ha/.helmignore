@@ -1,0 +1,13 @@
+# Patterns to ignore when building Helm packages.
+*.tgz
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+.DS_Store
+.idea/
+.vscode/
+values.local.yaml
+credentials.local

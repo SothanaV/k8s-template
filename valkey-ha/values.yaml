@@ -1,0 +1,283 @@
+# Values for the Valkey 8 HA chart in this directory (StatefulSet + Sentinel sidecars
+# + HAProxy master/replica routing).
+#
+# Images, all upstream and unmodified:
+#   valkey    valkey/valkey:8-alpine      — data nodes AND Sentinel sidecars (same image
+#                                          the compose template used; it ships
+#                                          valkey-server, valkey-sentinel and valkey-cli)
+#   haproxy   haproxy:3.0-alpine          — role-aware TCP proxy (master R/W, replica R/O)
+#   insight   redislabs/redisinsight      — optional GUI, disabled by default
+#
+# How this maps from the docker-compose template:
+#   valkey-node-1/2/3 (static 172.29.0.11-13)  ->  StatefulSet pods reached through
+#       per-node ClusterIP Services (`<fullname>-node-<i>`), whose VIP is stable even
+#       when a pod is rescheduled to another node with a new pod IP
+#   valkey-sentinel-1/2/3 (network_mode: service) ->  Sentinel sidecar container in each
+#       data pod, same shared network namespace as compose's mode gave
+#   haproxy-1/2 ->  HAProxy Deployment, role detection by tcp-check kept verbatim
+#   hardcoded `--replicaof 172.29.0.11` ->  entrypoint discovers the CURRENT master from
+#       Sentinel (or the live cluster) at boot, so a pod that restarts after a failover
+#       re-joins the new master instead of reviving the old one
+
+# -- Chart name used in object names. Empty = `valkey-ha` from Chart.yaml
+nameOverride: ""
+# -- Overrides the `<release>-<chart>` prefix. Pinned so node addresses are stable
+# whatever the release name is: Sentinel rewrites its own state file with the address
+# it monitors, and HAProxy's config is generated from these names at render time.
+# Installing a second release in one namespace? Change this, or use another namespace.
+fullnameOverride: "valkey-ha"
+
+# -- Namespace baked into pod/service hostnames. Leave empty to use the release
+# namespace. Set it only when the pods really run there — Sentinel persists the
+# monitored address, so a wrong value survives restarts as an unreachable master.
+namespaceOverride: ""
+# -- Cluster DNS suffix (`<namespace>.svc.<this>`) inside those hostnames
+clusterDomain: "cluster.local"
+
+# -- Labels merged into every rendered object
+commonLabels: {}
+# -- Annotations merged into every rendered object
+commonAnnotations: {}
+
+image:
+  # -- Registry prefix. Leave EMPTY when `repository` already carries the host
+  registry: "docker.io"
+  repository: "valkey/valkey"
+  # -- Keep the Valkey major in step with `appVersion`
+  tag: "8-alpine"
+  # -- Optional `sha256:` digest. When set it replaces the tag in the image reference
+  digest: ""
+  pullPolicy: IfNotPresent
+
+# -- ImagePullSecrets names, needed for a private registry, e.g. `[harborSecret]`
+imagePullSecrets: []
+
+# -- Number of Valkey data pods. Compose ran 3; 3 is also the minimum that makes
+# Sentinel failover safe (a 2-node split lets both sides elect themselves). Renders are
+# rejected when `sentinel.quorum` is not a majority of this count
+replicas: 3
+
+# -- Seconds between SIGTERM and SIGKILL. RDB/AOF are already on disk (appendonly),
+# so this only has to cover the final save Valkey skips when it is already clean
+terminationGracePeriodSeconds: 60
+
+bootstrap:
+  # -- Ordinal that starts as the initial master on a cold cluster (no Sentinel
+  # answers, nobody reports `role:master`). After the first failover this value only
+  # records intent: the live master is whatever Sentinel says it is, and every entry
+  # point re-asks at boot
+  primaryOrdinal: 0
+  # -- Seconds a data pod waits for an existing Sentinel quorum to name the current
+  # master before falling back to the bootstrap rule. Only paid when the cluster is
+  # down or being rebuilt; skipped entirely on a pod with an empty data volume
+  sentinelAnswerTimeoutSeconds: 20
+
+valkey:
+  # -- Valkey data port. Also the port HAProxy's tcp-checks and Sentinel monitor
+  port: 6379
+  # -- AOF persistence (`--appendonly`). The compose template ran with it on; turning
+  # it off makes a full cluster restart start EMPTY
+  appendOnly: true
+  # -- Extra server settings appended as `--<key> <value>` CLI args, mirroring the
+  # compose command style. Values must be single tokens (no spaces), e.g.:
+  #   maxmemory: 256mb
+  #   maxmemory-policy: allkeys-lru
+  config: {}
+  resources: {}
+  #   requests: {memory: 256Mi, cpu: 100m}
+  #   limits: {memory: 512Mi}
+
+sentinel:
+  # -- Sentinel port, published by every node Service next to the data port
+  port: 26379
+  # -- Monitored master name — the `mymaster` from the compose sentinel.conf
+  masterName: mymaster
+  # -- Sentinels that must agree the master is down before failing over. The render
+  # refuses anything that is not a majority of `replicas`: on a network partition a
+  # minority quorum lets both halves promote a master
+  quorum: 2
+  # -- `sentinel down-after-milliseconds` — how long a sentinel waits on PING replies
+  # before flagging the master subjectively down
+  downAfterMilliseconds: 5000
+  # -- `sentinel failover-timeout` — give up on a failover this many ms after it starts
+  failoverTimeout: 10000
+  # -- Replicas re-syncing with the new master at once. 1 (as in compose) keeps the
+  # remaining replicas serving reads during a failover
+  parallelSyncs: 1
+  # -- Seconds between watchdog passes in each Sentinel sidecar. The watchdog fixes a
+  # failure mode raw Sentinel has in Kubernetes: its state file stores the master's IP,
+  # and a rescheduled pod gets a new one. The watchdog re-points `mymaster` at the
+  # stable per-node Service VIP of whichever node actually holds `role:master`
+  watchdogIntervalSeconds: 10
+  # -- Free-form lines appended to the generated sentinel.conf (advanced):
+  #   sentinel notification-script /scripts/notify.sh
+  extraConfig: ""
+  resources: {}
+  #   requests: {cpu: 10m, memory: 32Mi}
+
+auth:
+  # -- Pre-created Secret carrying the password keys named below. Leave EMPTY and the
+  # chart renders a Secret from the `valkeyPassword` / `sentinelPassword` /
+  # `haproxy.statsPassword` placeholders below (compose-parity defaults — change them
+  # for anything beyond a local cluster). Point it at your own Secret to keep real
+  # credentials out of values files entirely; it must live in the release namespace
+  # and carry all three keys:
+  #
+  #   kubectl -n <namespace> create secret generic valkey-ha-secret \
+  #     --from-literal=valkey-password=... \
+  #     --from-literal=sentinel-password=... \
+  #     --from-literal=stats-password=...
+  existingSecret: ""
+  # -- Secret name to CREATE when `existingSecret` is empty. Empty = `<fullname>`
+  secretName: ""
+  valkeyPasswordKey: valkey-password
+  sentinelPasswordKey: sentinel-password
+  statsPasswordKey: stats-password
+
+  # -- Used only when the chart creates the Secret. Charset is restricted to
+  # `[A-Za-z0-9._@:-]` (rendered into sentinel.conf via sed and HAProxy's tcp-check
+  # AUTH line); empty values are rejected
+  valkeyPassword: "ValkeyPass123"
+  sentinelPassword: "SentinelPass123"
+
+haproxy:
+  # -- Set false to run just the Valkey/Sentinel cluster and talk to the per-node
+  # Services directly
+  enabled: true
+  # -- Active-active proxy count, like compose's haproxy-1/2. Both render the same
+  # config and both route to whichever node is master
+  replicas: 2
+  image:
+    registry: "docker.io"
+    repository: "haproxy"
+    tag: "3.0-alpine"
+    digest: ""
+    pullPolicy: IfNotPresent
+
+  # -- R/W endpoint. HAProxy forwards it only to the node answering
+  # `role:master` to INFO replication, so clients never need Sentinel themselves
+  masterPort: 6379
+  # -- Read-only endpoint, round-robin over the nodes answering `role:slave`
+  # (the regex also accepts Valkey's `role:replica` spelling)
+  replicaPort: 6380
+  # -- Stats UI on /stats + Prometheus exporter on /metrics
+  statsPort: 8404
+  statsUser: "admin"
+  statsPassword: "AdminPass123"
+
+  # -- `maxconn` in the haproxy.cfg global section
+  maxConnections: 4096
+  # -- tcp-check cadence, verbatim from compose (`check inter 1s fall 2 rise 2`).
+  # This is how fast a role flip (post-failover) moves the R/W endpoint
+  checkInterval: "1s"
+  checkFallCount: 2
+  checkRiseCount: 2
+
+  service:
+    # -- ClusterIP | LoadBalancer | NodePort. MetalLB hands out a real IP for
+    # LoadBalancer in this workspace
+    type: ClusterIP
+    # -- e.g. metallb address pool annotations
+    annotations: {}
+    # -- Only honoured for type NodePort; empty = cluster picks
+    nodePorts:
+      master: ""
+      replica: ""
+      stats: ""
+  # -- Replace the whole haproxy.cfg (still needs the @SERVERS@, @VALKEY_PASSWORD@ and
+  # @STATS_PASSWORD@ tokens — see files/haproxy.cfg.tpl). Empty = use the chart's
+  configTemplate: ""
+  resources: {}
+  #   requests: {cpu: 50m, memory: 32Mi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # -- Spread the two proxies over different nodes by default
+  topologySpreadConstraints: []
+  podSecurityContext: {}
+  containerSecurityContext: {}
+  terminationGracePeriodSeconds: 30
+
+redisInsight:
+  # -- Redis Insight GUI, the compose `redis-insight` service. Off by default —
+  # it is a browser-facing admin tool, not part of the data path
+  enabled: false
+  image:
+    registry: "docker.io"
+    repository: "redislabs/redisinsight"
+    tag: "3.10"
+    digest: ""
+    pullPolicy: IfNotPresent
+  port: 5540
+  service:
+    type: ClusterIP
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hostname: "valkey-insight.local"
+    path: /
+    pathType: Prefix
+    tls: []
+  persistence:
+    # -- Keeps Redis Insight's own connection profiles/workbench across restarts
+    # (compose mounted a `redisinsight` volume for the same reason). NOT valkey data
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+persistence:
+  # -- One PVC per pod via volumeClaimTemplates (replaces compose's three named
+  # valkey-data-N volumes)
+  enabled: true
+  size: 1Gi
+  # -- "" = cluster default StorageClass. Name one that exists (`kubectl get sc`)
+  storageClass: ""
+  accessModes: [ReadWriteOnce]
+  # -- Label selector to pick existing PVs statically (advanced; usually empty)
+  selector: {}
+
+podDisruptionBudget:
+  # -- Refuse voluntary evictions that would take the cluster below quorum.
+  # minAvailable 2 of 3 keeps failover majority (and the R/W endpoint) through a
+  # node drain. The render rejects a value >= replicas — it would deadlock every drain
+  valkey:
+    enabled: true
+    minAvailable: 2
+  haproxy:
+    enabled: true
+    minAvailable: 1
+
+serviceAccount:
+  # -- Nothing in this chart calls the Kubernetes API (unlike the pg chart's role
+  # sync); a bare SA exists only to give pods a non-default identity when you need
+  # one for other selectors
+  create: false
+  name: ""
+  automountServiceAccountToken: false
+
+# ---- Valkey pod scheduling / security ------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Example — one valkey pod per node, which is what makes a node loss a quorum event:
+#   podAntiAffinity:
+#     preferredDuringSchedulingIgnoredDuringExecution:
+#       - weight: 100
+#         podAffinityTerm:
+#           topologyKey: kubernetes.io/hostname
+#           labelSelector:
+#             matchLabels:
+#               app.kubernetes.io/component: valkey
+topologySpreadConstraints: []
+# -- Both containers in the data pod start as root like compose does (the valkey
+# alpine image chowns /data itself, and the Sentinel sidecar writes its conf into an
+# emptyDir). A runAsUser works too as long as it can write both volumes
+podSecurityContext: {}
+containerSecurityContext: {}

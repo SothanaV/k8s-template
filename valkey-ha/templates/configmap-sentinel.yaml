@@ -1,0 +1,17 @@
+{{/*
+Sentinel's config TEMPLATE (the @TOKENS@ are filled per-pod by
+sentinel-entrypoint.sh — the monitor address differs per boot, so it cannot be
+rendered per-release like the haproxy ConfigMap) plus the optional
+sentinel.extraConfig tail.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "valkey-ha.sentinelConfName" . }}
+  labels:
+    {{- include "valkey-ha.labels" . | nindent 4 }}
+data:
+  sentinel.conf.tpl: |-
+    {{- .Files.Get "files/sentinel.conf.tpl" | nindent 4 }}
+  extra.conf: |-
+    {{- .Values.sentinel.extraConfig | nindent 4 }}

@@ -1,0 +1,157 @@
+{{- if .Values.haproxy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "valkey-ha.haproxyName" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "haproxy") | nindent 4 }}
+spec:
+  replicas: {{ .Values.haproxy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "valkey-ha.componentSelectorLabels" (list . "haproxy") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "valkey-ha.componentLabels" (list . "haproxy") | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-haproxy.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.haproxy.terminationGracePeriodSeconds }}
+      {{- with .Values.haproxy.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.haproxy.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.haproxy.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.haproxy.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.haproxy.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # HAProxy resolves every backend name ONCE at startup (no resolvers section —
+      # the backends are Service VIPs, which is precisely why that is safe). If a node
+      # Service did not exist yet, haproxy would exit "cannot resolve server address"
+      # and CrashLoop. The init container waits until each node answers PONG, which
+      # also means the first master has been elected and every AOF has loaded.
+      initContainers:
+        - name: wait-nodes
+          image: {{ include "valkey-ha.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              . /scripts/entrypoint-env.sh
+              while :; do
+                  ok=1
+                  for h in $NODE_SERVICE_HOSTS; do
+                      valkey-cli --no-auth-warning -a "$VALKEY_PASSWORD" -h "$h" -p "$VALKEY_PORT" \
+                          ping 2>/dev/null | grep -q PONG || { ok=0; break; }
+                  done
+                  [ "$ok" = 1 ] && { echo "all valkey nodes answer PONG"; exit 0; }
+                  echo "waiting for a valkey node to answer PONG"
+                  sleep 2
+              done
+          env:
+            - name: VALKEY_PORT
+              value: {{ .Values.valkey.port | quote }}
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valkey-ha.secretName" . }}
+                  key: {{ .Values.auth.valkeyPasswordKey }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      containers:
+        - name: haproxy
+          image: {{ include "valkey-ha.haproxyImage" . | quote }}
+          imagePullPolicy: {{ .Values.haproxy.image.pullPolicy }}
+          # The ConfigMap keeps the password tokens literal; this render step is the
+          # only place the valkey password and the stats password appear in the
+          # proxy's view of the world.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              awk '
+                {
+                  gsub(/@VALKEY_PASSWORD@/, ENVIRON["VALKEY_PASSWORD"])
+                  gsub(/@STATS_PASSWORD@/, ENVIRON["HAPROXY_STATS_PASSWORD"])
+                  print
+                }
+              ' /templates/haproxy.cfg.tpl > /tmp/haproxy.cfg || exit 1
+              grep -q '@VALKEY_PASSWORD@\|@STATS_PASSWORD@' /tmp/haproxy.cfg && {
+                echo "FATAL: a secret token survived substitution" >&2; exit 1; }
+              exec haproxy -f /tmp/haproxy.cfg
+          env:
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valkey-ha.secretName" . }}
+                  key: {{ .Values.auth.valkeyPasswordKey }}
+            - name: HAPROXY_STATS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valkey-ha.secretName" . }}
+                  key: {{ .Values.auth.statsPasswordKey }}
+          ports:
+            - name: master
+              containerPort: {{ .Values.haproxy.masterPort }}
+            - name: replica
+              containerPort: {{ .Values.haproxy.replicaPort }}
+            - name: stats
+              containerPort: {{ .Values.haproxy.statsPort }}
+          # The exporter endpoint needs no stats auth (the prometheus-exporter
+          # use-service rule bypasses it), so probes ride it instead of
+          # inventing a ping backend.
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: stats
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: stats
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          {{- with .Values.haproxy.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.haproxy.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: templates
+              mountPath: /templates
+              readOnly: true
+      volumes:
+        - name: templates
+          configMap:
+            name: {{ include "valkey-ha.haproxyName" . }}
+        - name: scripts
+          configMap:
+            name: {{ include "valkey-ha.scriptsName" . }}
+{{- end }}

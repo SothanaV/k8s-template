@@ -1,0 +1,24 @@
+apiVersion: v2
+name: valkey-ha
+description: Valkey 8 HA — a StatefulSet of replicated nodes with a Sentinel sidecar per pod, plus an HAProxy pair routing the master (6379 R/W) and replica (6380 R/O) endpoints by live role. The Kubernetes port of the ha-valkey docker-compose template
+type: application
+# Version of this Chart.yaml, not of Valkey. Bump on every chart edit so
+# `helm history <release>` stays traceable.
+version: 0.1.0
+# Valkey major this chart targets. Keep it in step with `image.tag`
+# (the compose template pinned `valkey/valkey:8-alpine`).
+appVersion: "8"
+keywords:
+  - valkey
+  - redis
+  - sentinel
+  - haproxy
+  - high-availability
+  - failover
+  - caching
+home: https://valkey.io
+sources:
+  - https://github.com/valkey-io/valkey
+  - https://github.com/haproxy/haproxy
+maintainers:
+  - name: sothana

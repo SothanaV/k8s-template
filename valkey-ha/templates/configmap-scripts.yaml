@@ -1,0 +1,34 @@
+{{/*
+The three pod scripts (static, from files/scripts/) plus entrypoint-env.sh — the one
+generated file, where values.yaml reaches the scripts as shell variables. Keeping the
+bodies static and the values in one small export file means `helm diff` on this
+ConfigMap shows exactly which knob moved, and a changed checksum rolls the StatefulSet
+(scripts are mounted read-only; kubelet updates the file but the running entrypoint
+already read it — the restart is what applies it).
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "valkey-ha.scriptsName" . }}
+  labels:
+    {{- include "valkey-ha.labels" . | nindent 4 }}
+data:
+  common.sh: |-
+    {{- .Files.Get "files/scripts/common.sh" | nindent 4 }}
+  valkey-entrypoint.sh: |-
+    {{- .Files.Get "files/scripts/valkey-entrypoint.sh" | nindent 4 }}
+  sentinel-entrypoint.sh: |-
+    {{- .Files.Get "files/scripts/sentinel-entrypoint.sh" | nindent 4 }}
+  entrypoint-env.sh: |-
+    export APPENDONLY={{ ternary "yes" "no" .Values.valkey.appendOnly }}
+    export VALKEY_EXTRA_ARGS={{ include "valkey-ha.valkeyExtraArgs" . | toJson }}
+    export SENTINEL_WATCHDOG_INTERVAL={{ int .Values.sentinel.watchdogIntervalSeconds }}
+    export SENTINEL_ANSWER_TIMEOUT={{ int .Values.bootstrap.sentinelAnswerTimeoutSeconds }}
+    export SENTINEL_QUORUM={{ int .Values.sentinel.quorum }}
+    export SENTINEL_DOWN_AFTER={{ int .Values.sentinel.downAfterMilliseconds }}
+    export SENTINEL_FAILOVER_TIMEOUT={{ int .Values.sentinel.failoverTimeout }}
+    export SENTINEL_PARALLEL_SYNCS={{ int .Values.sentinel.parallelSyncs }}
+    export PRIMARY_ORDINAL={{ int .Values.bootstrap.primaryOrdinal }}
+    export PRIMARY_NODE_SERVICE_HOST={{ include "valkey-ha.primaryNodeServiceHost" . | quote }}
+    export NODE_SERVICE_HOSTS={{ include "valkey-ha.nodeServiceHosts" . | quote }}
+    export FULLNAME={{ include "valkey-ha.fullname" . | quote }}

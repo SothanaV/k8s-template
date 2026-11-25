@@ -1,0 +1,16 @@
+{{- if .Values.haproxy.enabled }}
+{{/*
+The haproxy ConfigMap carries NO secret: servers/ports are chart output, while
+@VALKEY_PASSWORD@ and @STATS_PASSWORD@ survive substitution until the container
+starts, where the deployment's command fills them from secretKeyRef env vars.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "valkey-ha.haproxyName" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "haproxy") | nindent 4 }}
+data:
+  haproxy.cfg.tpl: |-
+    {{- include "valkey-ha.haproxyConfig" . | trim | nindent 4 }}
+{{- end }}

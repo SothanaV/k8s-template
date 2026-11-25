@@ -1,0 +1,225 @@
+{{/* Include the validator here: this file always renders, so no value slip escapes. */}}
+{{- include "valkey-ha.validate" . -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "valkey-ha.fullname" . }}
+  labels:
+    {{- include "valkey-ha.componentLabels" (list . "valkey") | nindent 4 }}
+spec:
+  serviceName: {{ include "valkey-ha.headlessName" . }}
+  replicas: {{ .Values.replicas }}
+  # OrderedReady, not Parallel: pod 0 (bootstrap.primaryOrdinal) must exist before the
+  # others scan for a master to follow. The field is immutable — if you ever need to
+  # change it, delete the StatefulSet with --cascade=orphan and re-apply.
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "valkey-ha.componentSelectorLabels" (list . "valkey") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "valkey-ha.componentLabels" (list . "valkey") | nindent 8 }}
+      annotations:
+        checksum/scripts: {{ include (print $.Template.BasePath "/configmap-scripts.yaml") . | sha256sum }}
+        checksum/sentinel-conf: {{ include (print $.Template.BasePath "/configmap-sentinel.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.commonAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "valkey-ha.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        # ---------- DATA NODE ----------
+        - name: valkey
+          image: {{ include "valkey-ha.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/scripts/valkey-entrypoint.sh"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: VALKEY_PORT
+              value: {{ .Values.valkey.port | quote }}
+            - name: SENTINEL_PORT
+              value: {{ .Values.sentinel.port | quote }}
+            - name: MASTER_NAME
+              value: {{ .Values.sentinel.masterName | quote }}
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valkey-ha.secretName" . }}
+                  key: {{ .Values.auth.valkeyPasswordKey }}
+            # SENTINEL_PASSWORD: the discovery helper asks Sentinels who the master is,
+            # and their client port has its own requirepass.
+            - name: SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valkey-ha.secretName" . }}
+                  key: {{ .Values.auth.sentinelPasswordKey }}
+          ports:
+            - name: valkey
+              containerPort: {{ .Values.valkey.port }}
+          # Startup covers AOF/RDB load: every PING during LOADING fails, and without
+          # this window the liveness probe would kill a big database mid-restore —
+          # the classic way to turn a restart into an endless restart loop.
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "valkey-cli --no-auth-warning -a \"$VALKEY_PASSWORD\" -p \"$VALKEY_PORT\" ping | grep -q PONG"]
+            periodSeconds: 5
+            failureThreshold: 120   # 10 minutes of load time
+          readinessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "valkey-cli --no-auth-warning -a \"$VALKEY_PASSWORD\" -p \"$VALKEY_PORT\" ping | grep -q PONG"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "valkey-cli --no-auth-warning -a \"$VALKEY_PASSWORD\" -p \"$VALKEY_PORT\" ping | grep -q PONG"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          {{- with .Values.valkey.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+        # ---------- SENTINEL SIDECAR ----------
+        # Same pod = same network namespace — exactly what compose's
+        # `network_mode: service:valkey-node-N` gave, so sentinel reaches its data
+        # node on 127.0.0.1 and gossips with peers over pod IPs.
+        - name: sentinel
+          image: {{ include "valkey-ha.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/scripts/sentinel-entrypoint.sh"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: VALKEY_PORT
+              value: {{ .Values.valkey.port | quote }}
+            - name: SENTINEL_PORT
+              value: {{ .Values.sentinel.port | quote }}
+            - name: MASTER_NAME
+              value: {{ .Values.sentinel.masterName | quote }}
+            - name: VALKEY_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valkey-ha.secretName" . }}
+                  key: {{ .Values.auth.valkeyPasswordKey }}
+            - name: SENTINEL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "valkey-ha.secretName" . }}
+                  key: {{ .Values.auth.sentinelPasswordKey }}
+          ports:
+            - name: sentinel
+              containerPort: {{ .Values.sentinel.port }}
+          # Own startup window: it waits for the data node's PONG inside its
+          # entrypoint, and a pod booting mid-load must not be killed for waiting.
+          startupProbe:
+            exec:
+              command: ["/bin/sh", "-c", "valkey-cli --no-auth-warning -a \"$SENTINEL_PASSWORD\" -p \"$SENTINEL_PORT\" ping | grep -q PONG"]
+            periodSeconds: 5
+            failureThreshold: 240   # 20 minutes: waits out the data node's own load
+          livenessProbe:
+            exec:
+              command: ["/bin/sh", "-c", "valkey-cli --no-auth-warning -a \"$SENTINEL_PASSWORD\" -p \"$SENTINEL_PORT\" ping | grep -q PONG"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          {{- with .Values.sentinel.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: sentinel-state
+              mountPath: /etc/valkey
+            - name: sentinel-template
+              mountPath: /etc/valkey-template
+              readOnly: true
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ include "valkey-ha.scriptsName" . }}
+            defaultMode: 0755
+        - name: sentinel-template
+          configMap:
+            name: {{ include "valkey-ha.sentinelConfName" . }}
+        # Sentinel's rewritten conf lives here, mirroring compose's sentinel-state-N
+        # volumes. emptyDir on purpose: after a pod restart the entrypoint
+        # re-derives the monitor target from the live cluster anyway, and persisting
+        # the file on the data PVC would resurrect a stale pod-IP monitor target —
+        # the exact failure the watchdog exists to repair.
+        - name: sentinel-state
+          emptyDir: {}
+        {{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "valkey-ha.componentLabels" (list . "valkey") | nindent 10 }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass | quote }}
+        {{- end }}
+        {{- with .Values.persistence.selector }}
+        selector:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
+  {{- end }}
