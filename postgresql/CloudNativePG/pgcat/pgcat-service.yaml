@@ -1,0 +1,28 @@
+# The single endpoint clients use. Deliberately a plain ClusterIP: this is the in-cluster
+# address, and nothing here has to change when the CNPG cluster fails over.
+#
+#   psql "host=pgcat.cnpg.svc port=6432 dbname=app_db user=app_user"
+#   jdbc:postgresql://pgcat.cnpg.svc:6432/app_db
+apiVersion: v1
+kind: Service
+metadata:
+  name: pgcat
+  namespace: cnpg
+  labels:
+    app.kubernetes.io/name: pgcat
+    app.kubernetes.io/component: pooler
+    app.kubernetes.io/part-of: my-postgres-prod
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pgcat
+    app.kubernetes.io/component: pooler
+  ports:
+    - name: pgcat
+      port: 6432
+      targetPort: pgcat
+      protocol: TCP
+    - name: metrics
+      port: 9930
+      targetPort: metrics
+      protocol: TCP

@@ -1,0 +1,90 @@
+# pgcat.toml source template for the CloudNativePG cluster in this folder.
+#
+# Adapted from postgresql/sothanav-ha-pg/files/pgcat.toml.tpl, with the role-sync
+# machinery removed: that chart had to discover the primary itself (repmgr state lives
+# inside the database pods), so a script rendered the server list and PATCHed it into a
+# ConfigMap. CloudNativePG publishes the same fact as Kubernetes objects instead —
+# <cluster>-rw selects cnpg.io/instanceRole=primary and <cluster>-ro selects
+# cnpg.io/instanceRole=replica, and the operator keeps both correct through a failover.
+# The two hostnames below therefore never change, so this file is static: no script, no
+# ServiceAccount, no RBAC, no watcher.
+#
+# This is a TEMPLATE, not the live config. The container substitutes every
+# double-underscore token at start-up (see pgcat-deployment.yaml) and writes the result
+# into an emptyDir, because the passwords come from Secrets and must not be baked into a
+# ConfigMap.
+#
+# Substitution is a plain global string replace, so never spell a token name anywhere in
+# this file, comments included: a token inside a comment is replaced too, and injecting a
+# password into a comment line is how you leak it into `kubectl get cm -o yaml`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pgcat-config
+  namespace: cnpg
+  labels:
+    app.kubernetes.io/name: pgcat
+    app.kubernetes.io/component: pooler
+data:
+  pgcat.toml.tpl: |
+    [general]
+    host = "0.0.0.0"
+    port = 6432
+
+    # pgcat-local admin account, NOT a PostgreSQL role. It must not collide with the pool
+    # username below or normal client sessions land on the admin console.
+    admin_username = "__ADMIN_USER__"
+    admin_password = "__ADMIN_PASSWORD__"
+
+    healthcheck_delay = 1000
+    healthcheck_timeout = 1000
+    # A server that fails its healthcheck is taken out for this long. On a CNPG failover
+    # the old primary's pooled connections fail first and come back on their own — no
+    # reload is needed, the hostnames are stable.
+    ban_time = 10
+
+    idle_timeout = 60000
+    connect_timeout = 3000
+    server_lifetime = 3600000
+
+    # pgcat re-reads the file on this timer (ms). With a static server list this is only a
+    # safety net; it matters if you edit the rendered file by hand while debugging.
+    autoreload = 3000
+
+    enable_prometheus_exporter = true
+    prometheus_exporter_port = 9930
+
+    [pools.app_db]
+    pool_mode = "transaction"
+    # Fallback for queries pgcat cannot classify. Keep "primary": with "any" they land on
+    # a standby and fail with "cannot execute ... in a read-only transaction".
+    default_role = "primary"
+    query_parser_enabled = true
+    # pgcat 1.x keeps read/write inference behind this second flag. Without it pgcat picks
+    # a random server per query, so most writes go to a replica and fail.
+    query_parser_read_write_splitting = true
+    # false = reads never touch the primary. Set true if you want the primary to serve
+    # reads too when every replica is banned.
+    primary_reads_enabled = false
+    load_balancing_mode = "random"
+    checkout_timeout = 3000
+
+    [pools.app_db.shards.0]
+    # Two entries, not three: -ro is one address holding both standbys, so one pgcat
+    # replica sends its reads to whichever standby the Service picked. Per-replica
+    # balancing needs per-pod DNS, which CloudNativePG does not create here (-r is a normal
+    # ClusterIP, and pg-1.<cluster>-r.<ns>.svc does not resolve) — see the Pooler section
+    # of ../README.md.
+    servers = [
+      ["my-postgres-prod-rw", 5432, "primary"],
+      ["my-postgres-prod-ro", 5432, "replica"],
+    ]
+    database = "app_db"
+
+    [pools.app_db.users.0]
+    username = "__DB_USER__"
+    password = "__DB_PASSWORD__"
+    # pool_size x pgcat replicas + CNPG's own replication/superuser connections must stay
+    # under the cluster's max_connections (200 in example/pg-cluster.yaml). 30 x 2 is safe.
+    pool_size = 30
+    statement_timeout = 0
